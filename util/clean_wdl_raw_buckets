@@ -24,6 +24,7 @@ from common import (
 )
 
 
+FILTERED_TERMS = ["gcloud storage rm", "Removing"]
 class FilteredTee:
     """Tees logging output to a file, filtering out gcloud storage rm commands."""
     def __init__(self, logfile, stream):
@@ -32,7 +33,7 @@ class FilteredTee:
 
     def write(self, message):
         self.stream.write(message)
-        if message.strip() and "gcloud storage rm" not in message:
+        if message.strip() and not any(term in message for term in FILTERED_TERMS) and not message.strip().startswith("..."):
             self.logfile.write(message)
 
     def flush(self):
