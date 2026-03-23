@@ -130,6 +130,8 @@ def parse_path(full_path, bucket):
 
 
 def main():
+    total_freed = 0
+
     for BUCKET in raw_buckets:
         logging.info(f"Listing files under {BUCKET}/{PREFIX} ...")
         try:
@@ -165,6 +167,7 @@ def main():
             continue
 
         size_to_delete = sum(all_files[p] for p in to_delete)
+        total_freed += size_to_delete
         size_after = total_before - size_to_delete
         logging.info(f"{len(to_delete)} files to delete.")
         logging.info(f"Before: {format_size(total_before)} | To free: {format_size(size_to_delete)} | After: {format_size(size_after)}")
@@ -177,6 +180,8 @@ def main():
             logging.info("Running in DRY-RUN mode — printing gcloud storage rm commands only.\n")
             for path in sorted(to_delete):
                 print(f"gcloud storage rm --billing-project={BILLING_PROJECT} '{path}'")
+
+    logging.info(f"\nTotal space freed: {format_size(total_freed)}")
 
 
 if __name__ == "__main__":
