@@ -24,7 +24,31 @@ from common import (
 )
 
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+class FilteredTee:
+    """Tees logging output to a file, filtering out gcloud storage rm commands."""
+    def __init__(self, logfile, stream):
+        self.logfile = logfile
+        self.stream = stream
+
+    def write(self, message):
+        self.stream.write(message)
+        if message.strip() and "gcloud storage rm" not in message:
+            self.logfile.write(message)
+
+    def flush(self):
+        self.stream.flush()
+        self.logfile.flush()
+
+
+LOG_PATH = "clean_wdl_raw_buckets.log"
+_log_file = open(LOG_PATH, "w")
+_tee = FilteredTee(_log_file, sys.stderr)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    handlers=[logging.StreamHandler(_tee)]
+)
 
 raw_buckets = [
     bucket.replace("dev", "raw")
@@ -35,19 +59,35 @@ BILLING_PROJECT = "dnastack-asap-parkinsons"
 
 
 def list_files(bucket, prefix):
-    """List all files recursively under bucket/prefix using gcloud storage ls."""
+    """List all files recursively under bucket/prefix, returning {path: size_bytes}."""
     uri = f"{bucket}/{prefix}"
     command = [
-        "gcloud", "storage", "ls", "--recursive",
+        "gcloud", "storage", "ls", "--recursive", "--long",
         "--billing-project", BILLING_PROJECT,
         uri
     ]
     result = subprocess.run(command, check=True, capture_output=True, text=True)
-    return [
-        line.strip()
-        for line in result.stdout.splitlines()
-        if line.strip() and not line.strip().endswith(":")
-    ]
+    files = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line.endswith(":"):
+            continue
+        parts = line.split()
+        # --long output: <size>  <last_modified>  <uri>
+        if len(parts) >= 3 and parts[2].startswith("gs://"):
+            try:
+                files[parts[2]] = int(parts[0])
+            except ValueError:
+                continue
+    return files  # {full_path: size_bytes}
+
+
+def format_size(size_bytes):
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size_bytes < 1024:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.2f} PB"
 
 
 def parse_path(full_path, bucket):
@@ -92,11 +132,13 @@ def main():
     for BUCKET in raw_buckets:
         logging.info(f"Listing files under {BUCKET}/{PREFIX} ...")
         try:
-            all_files = list_files(BUCKET, PREFIX)
+            all_files = list_files(BUCKET, PREFIX)  # {full_path: size_bytes}
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to list files: {e.stderr}")
             sys.exit(1)
-        logging.info(f"Found {len(all_files)} files")
+
+        total_before = sum(all_files.values())
+        logging.info(f"Found {len(all_files)} files ({format_size(total_before)})")
 
         # Group by (version, rel_path) -> list of (timestamp, full_path)
         groups = defaultdict(list)
@@ -118,10 +160,13 @@ def main():
                 to_delete.append(full_path)
 
         if not to_delete:
-            logging.info("Nothing to delete.")
+            logging.info(f"Nothing to delete for {BUCKET}.\n")
             continue
 
+        size_to_delete = sum(all_files[p] for p in to_delete)
+        size_after = total_before - size_to_delete
         logging.info(f"{len(to_delete)} files to delete.")
+        logging.info(f"Before: {format_size(total_before)} | To free: {format_size(size_to_delete)} | After: {format_size(size_after)}")
 
         if args.production:
             logging.info("Running in PRODUCTION mode — deleting files...")
