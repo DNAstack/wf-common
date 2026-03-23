@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cleanup script for GCP raw bucket workflow execution timestamp cohort analysis and downstream folders.
+Clean up script for GCP raw bucket workflow execution timestamp cohort analysis and downstream folders.
 
 For each unique file path (relative to the timestamp folder) within a version,
 keeps only the copy in the latest timestamp folder and prints gcloud rm commands
