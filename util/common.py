@@ -36,6 +36,7 @@ releases_df["dev_buckets"] = "gs://asap-dev-" + releases_df["dataset_id"]
 ALL_TEAMS = releases_df["team_id"].unique().tolist()
 
 ## Minor and Major Release that includes pipeline/curated outputs
+### The workflow_version column is being used to infer datasets with pipeline outputs
 unembargoed_dev_buckets_and_workflow_version_outputs = (
 	releases_df[
 		releases_df["workflow_version"].str.startswith("v", na=False)
