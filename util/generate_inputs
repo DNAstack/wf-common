@@ -27,6 +27,15 @@ def generate_sample_list(projects):
                         "sample_id": sample_id,
                         "dataset_doi_url": dataset_doi_url
                     })
+        elif args.workflow_name == "sc_atacseq_analysis":
+            for pool in project["pools"]:
+                for sample in pool["samples"]:
+                    sample_id = sample["asap_sample_id"]
+                    sample_list_table.append({
+                        "team_id": team_id,
+                        "sample_id": sample_id,
+                        "dataset_doi_url": dataset_doi_url
+                    })
         else:
             for sample in project["samples"]:
                 sample_id = sample["asap_sample_id"]
@@ -72,6 +81,7 @@ def main(args):
             team_id = row.team_id
             asap_dataset_id = row.ASAP_dataset_id
             asap_sample_id = row.ASAP_sample_id
+            asap_subject_id = row.ASAP_subject_id
             batch = str(row.batch)
             fastq_R1s = literal_eval(row.fastq_R1s)
             fastq_R2s = literal_eval(row.fastq_R2s)
@@ -96,12 +106,17 @@ def main(args):
             if args.workflow_name == "sc_atacseq_analysis":
                 fastq_R3s = literal_eval(row.fastq_R3s)
                 sample = {
-                    "asap_sample_id": asap_sample_id,
+                    "asap_subject_id": asap_subject_id,
+                    "asap_sample_id": asap_sample_id
+                }
+                pool = {
+                    "asap_pool_id": asap_pool_id,
                     "fastq_R1s": fastq_R1s,
                     "fastq_R2s": fastq_R2s,
                     "fastq_R3s": fastq_R3s,
                     "fastq_I1s": fastq_I1s,
                     "fastq_I2s": fastq_I2s,
+                    "samples": [sample]
                 }
             else:
                 sample = {
@@ -143,7 +158,7 @@ def main(args):
                     "staging_data_buckets": staging_data_buckets,
                 }
 
-                if args.workflow_name == "sc_rnaseq_analysis":
+                if args.workflow_name == "sc_rnaseq_analysis" or args.workflow_name == "sc_atacseq_analysis":
                     projects[team_id]["multimodal_sc_data"] = "Boolean"
 
                 if args.workflow_name == "pmdbs_bulk_rnaseq_analysis":
@@ -161,6 +176,17 @@ def main(args):
                     }
                     projects[team_id]["asap_project_sample_metadata_csv"] = f"gs://asap-raw-{dataset_id}/metadata/release/{args.release_version}/SAMPLE.csv"
                     projects[team_id]["geomx_config_ini"] = "File"
+                
+                if args.workflow_name == "sc_atacseq_analysis":
+                    projects[team_id] = {
+                        "asap_team_id": team_id,
+                        "asap_dataset_id": asap_dataset_id,
+                        "asap_dataset_doi_url": asap_dataset_doi_url,
+                        "pools": [pool],
+                        "run_project_cohort_analysis": run_project_cohort_analysis,
+                        "raw_data_bucket": f"gs://asap-raw-{dataset_id}",
+                        "staging_data_buckets": staging_data_buckets,
+                    }
             else:
                 if args.workflow_name == "spatial_geomx_analysis":
                     slide = next(
