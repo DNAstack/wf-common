@@ -22,6 +22,8 @@ def get_releases_df(
 	tab_name: str = "Releases_automated",
 	credentials_path: str = os.path.expanduser("~/.config/gspread/credentials.json")
 ) -> pd.DataFrame:
+	if not os.path.exists(credentials_path):
+		raise FileNotFoundError(f"Credentials file not found: {credentials_path}; look at README")
 	creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
 	gc = gspread.authorize(creds)
 	ws = gc.open_by_key(sheet_id).worksheet(tab_name)
