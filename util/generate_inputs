@@ -79,6 +79,7 @@ def main(args):
             )
         for index, row in project_df.iterrows():
             team_id = row.team_id
+            asap_pool_id = row.ASAP_pool_id #TODO
             asap_dataset_id = row.ASAP_dataset_id
             asap_sample_id = row.ASAP_sample_id
             asap_subject_id = row.ASAP_subject_id
@@ -107,7 +108,7 @@ def main(args):
                 fastq_R3s = literal_eval(row.fastq_R3s)
                 sample = {
                     "asap_subject_id": asap_subject_id,
-                    "asap_sample_id": asap_sample_id
+                    "sample_id": asap_sample_id
                 }
                 pool = {
                     "asap_pool_id": asap_pool_id,
@@ -120,7 +121,7 @@ def main(args):
                 }
             else:
                 sample = {
-                    "asap_sample_id": asap_sample_id,
+                    "sample_id": asap_sample_id,
                     "fastq_R1s": fastq_R1s,
                     "fastq_R2s": fastq_R2s,
                     "fastq_I1s": fastq_I1s,
