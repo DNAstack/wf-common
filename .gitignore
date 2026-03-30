@@ -17,3 +17,5 @@ promote_staging_data_script.log
 # Credentials
 *credentials.json
 
+# Logs
+*.log
