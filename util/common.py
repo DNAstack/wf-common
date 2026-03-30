@@ -19,9 +19,11 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 def get_releases_df(
 	sheet_id: str = "1Qx4W3EsGQwRHXKtDd6jBnEyPGsuhxB8YCVdgJ-Mn6Hs",
-	tab_name: str = "Releases_automated",
+	tab_name: str = "Releases_src",
 	credentials_path: str = os.path.expanduser("~/.config/gspread/credentials.json")
 ) -> pd.DataFrame:
+	if not os.path.exists(credentials_path):
+		raise FileNotFoundError(f"Credentials file not found: {credentials_path}; look at README")
 	creds = Credentials.from_service_account_file(credentials_path, scopes=SCOPES)
 	gc = gspread.authorize(creds)
 	ws = gc.open_by_key(sheet_id).worksheet(tab_name)
@@ -34,19 +36,20 @@ releases_df["dev_buckets"] = "gs://asap-dev-" + releases_df["dataset_id"]
 ALL_TEAMS = releases_df["team_id"].unique().tolist()
 
 ## Minor and Major Release that includes pipeline/curated outputs
+### The latest_workflow_version column is being used to infer datasets with pipeline outputs
 unembargoed_dev_buckets_and_workflow_version_outputs = (
 	releases_df[
-		releases_df["workflow_version"].str.startswith("v", na=False)
+		releases_df["latest_workflow_version"].str.startswith("v", na=False)
 	]
-	.sort_values("workflow_version")
+	.sort_values("latest_workflow_version")
 	.drop_duplicates(subset="dev_buckets", keep="last")
-	.set_index("dev_buckets")["workflow_version"]
+	.set_index("dev_buckets")["latest_workflow_version"]
 	.to_dict()
 )
 ## Urgent and Minor Release or platforming exercise during a Major Release
 completed_platforming_raw_buckets = (
 	releases_df[
-		~releases_df["workflow_version"].str.startswith("v", na=False)
+		~releases_df["latest_workflow_version"].str.startswith("v", na=False)
 	]["dataset_id"]
 	.drop_duplicates()
 	.tolist()
@@ -69,10 +72,8 @@ def remove_internal_qc_label(bucket_name):
 	return result.stdout
 
 
-def get_team_name(bucket_name):
-	match = re.search(r"team-(.*?)-(mouse|pmdbs|invitro|fecal|human)", bucket_name)
-	team = match.group(1)
-	return team
+def get_team_name(bucket: str) -> str:
+	return bucket.split("-team-", 1)[1].split("-")[0]
 
 
 def strip_team_prefix(entity_id: str) -> str:
@@ -131,13 +132,13 @@ def change_gg_storage_admin_to_read_write(bucket_name):
 			f"--role={role_admin}"
 		])
 		run_command([
-		"gcloud",
-		"storage",
-		"buckets",
-		"add-iam-policy-binding",
-		bucket_name,
-		f"--member={member}",
-		"--role=roles/storage.objectViewer"
+			"gcloud",
+			"storage",
+			"buckets",
+			"add-iam-policy-binding",
+			bucket_name,
+			f"--member={member}",
+			"--role=roles/storage.objectViewer"
 		])
 		run_command([
 			"gcloud",
