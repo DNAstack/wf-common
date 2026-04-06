@@ -270,9 +270,9 @@ Queries the [CRN Cloud](https://cloud.parkinsonsroadmap.org) via the DNAstack CL
 | Column | Description |
 |--------|-------------|
 | `publisher_slug` | Dataset slug name in the CRN Cloud |
-| `gcp_raw_bucket` | GCS raw bucket URI (`NA` for cohort collections) |
+| `gcp_raw_bucket` | GCS raw bucket URI |
 | `gcp_raw_bucket_size` | Raw bucket size in bytes |
-| `gcp_curated_bucket` | GCS curated bucket URI (`NA` for cohort collections) |
+| `gcp_curated_bucket` | GCS curated bucket URI |
 | `gcp_curated_bucket_size` | Curated bucket size in bytes |
 | `team_name` | Contributing team name parsed from slug |
 | `n_samples` | Distinct `asap_sample_id` count from SAMPLE table |
