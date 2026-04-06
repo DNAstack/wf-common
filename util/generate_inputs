@@ -53,9 +53,10 @@ def generate_sample_list(projects):
     len_sample_ids = len(sample_list_df["sample_id"])
     len_unique_sample_ids = len(sorted(sample_list_df["sample_id"].unique().tolist()))
     if len_sample_ids != len_unique_sample_ids:
-        raise SystemExit(
-            f"Duplicate sample IDs found\nNo. of sample IDs: {len_sample_ids}\nNo. of unique sample IDs: {len_unique_sample_ids}"
-        )
+        if args.workflow_name != "sc_atacseq_analysis":
+            raise SystemExit(
+                f"Duplicate sample IDs found\nNo. of sample IDs: {len_sample_ids}\nNo. of unique sample IDs: {len_unique_sample_ids}"
+            )
 
     return team_id_prefix, sample_list_df
 
