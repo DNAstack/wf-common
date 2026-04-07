@@ -265,10 +265,22 @@ while IFS= read -r slug; do
         gcp_prod_bucket="${gcp_raw_bucket/raw/curated}"
     fi
 
-    echo "Getting # of samples and subjects"
-    sample_count=$(query_collection "$slug" \
-        "SELECT COUNT(DISTINCT asap_sample_id) FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"" \
-        | tr -d '[:space:]')
+    echo "Getting # of samples"
+    if echo "$collection_tables" | grep -qi "${team_name}_assay"; then
+        echo "  ASSAY table found, counting distinct asap_sample_id + modality..."
+        sample_count=$(dnastack collections query -c "$slug" \
+            "SELECT COUNT(*) FROM (
+                SELECT DISTINCT asap_sample_id, modality
+                FROM \"collections\".\"$underscored_slug\".\"${team_name}_assay\"
+            )" \
+            -o csv 2>/dev/null | tail -n +2 | tr -d '[:space:]' || true)
+    fi
+    if [[ -z "$sample_count" ]] || [[ ! "$sample_count" =~ ^[0-9]+$ ]]; then
+        echo "  Falling back to COUNT(DISTINCT asap_sample_id) from SAMPLE table..."
+        sample_count=$(query_collection "$slug" \
+            "SELECT COUNT(DISTINCT asap_sample_id) FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"" \
+            | tr -d '[:space:]')
+    fi
 
     # Count subjects from SUBJECT table using whichever ID column exists
     echo "Getting # of subjects from SUBJECT table..."
