@@ -50,7 +50,7 @@ unembargoed_dev_buckets_and_workflow_version_outputs = (
 completed_platforming_raw_buckets = (
 	releases_df[
 		~releases_df["latest_workflow_version"].str.startswith("v", na=False)
-	]["dataset_id"]
+	]["raw_buckets"]
 	.drop_duplicates()
 	.tolist()
 )
