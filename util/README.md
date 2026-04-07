@@ -275,7 +275,7 @@ Queries the [CRN Cloud](https://cloud.parkinsonsroadmap.org) via the DNAstack CL
 | `gcp_curated_bucket` | GCS curated bucket URI |
 | `gcp_curated_bucket_size` | Curated bucket size in bytes |
 | `team_name` | Contributing team name parsed from slug |
-| `n_samples` | Distinct `asap_sample_id` count from SAMPLE table |
+| `n_samples` | Distinct `asap_sample_id` + `modality` count from ASSAY table; falls back to `COUNT(DISTINCT asap_sample_id)` from SAMPLE |
 | `n_subjects` | Subject count from SUBJECT, MOUSE, or CELL table (whichever applies); falls back to `COUNT(DISTINCT subject_id)` from SAMPLE |
 | `n_brain_samples` | Brain sample count from PMDBS table, or from `tissue` column in SAMPLE if no PMDBS table |
 | `n_brain_regions` | Distinct brain regions in PMDBS table |
