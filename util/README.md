@@ -290,12 +290,10 @@ Queries the [CRN Cloud](https://cloud.parkinsonsroadmap.org) via the DNAstack CL
 OPTIONS
   -h  Display this message and exit
   -s  Grab no. of samples and subjects only (skip bucket size queries)
-  -i  A previously generated TSV to append to, skipping already-processed datasets
-      (Note: Use only if certain that earlier datasets have not been updated)
-  -l  A file containing a list of dataset_ids to process, one per line
-      (e.g. team-hafler-pmdbs-sn-rnaseq-pfc, cohort-pmdbs-sc-rnaseq).
-      Slug is inferred by prepending "prod-". team-* and cohort-* prefixes are
-      used to classify individual vs. harmonized collections respectively.
+  -i  A previously generated TSV to append to, skipping already-processed datasets (Note: Use only if certain that earlier datasets have not been updated)
+  -l  A file containing a list of dataset_ids to process, one per line (e.g. team-hafler-pmdbs-sn-rnaseq-pfc, cohort-pmdbs-sc-rnaseq).
+      Slug is inferred by prepending "prod-" to query the CRN Cloud.
+      team-* and cohort-* prefixes are used to classify individual vs. harmonized collections respectively.
       If not provided, all datasets in the CRN Cloud are processed.
 ```
 
@@ -323,13 +321,13 @@ Scans GCP directly for `asap-raw-team-*` buckets labelled `internal-qc-data` and
 | `subject_count` | Distinct `subject_id` count from `SAMPLE.csv` |
 
 **Usage:**
-```
+```bash
 ./internal_qc_dataset_collection_summary [OPTIONS]
 
 OPTIONS
   -h  Display this message and exit
   -s  Grab no. of samples and subjects only (skip bucket size queries)
-  -l  Path to a file listing specific dataset slugs to process (e.g. for an upcoming release)
+  -l  Only grab info for a list of datasets, usually those included in the upcoming Release
 ```
 
 **Notes:**

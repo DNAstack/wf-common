@@ -8,7 +8,6 @@ cat << EOF
   Track datasets in internal QC by getting their ASAP raw buckets, size, sample breakdown, and subject breakdown in GCP.
   Note:
   - Raw bucket sizes include files that are used for development
-  - Storage size used for this project is much larger since unreleased data is stored in there as well and cross-team cohort data
   - Sample and subject breakdown is ongoing as more data modalities are being added
   - Sample and subject count can change as our Data Curators collaborate with CRN Teams to define this
     
@@ -18,7 +17,7 @@ cat << EOF
 
   OPTIONS
     -h  Display this message and exit
-    -s  Grab no. of samples and subjects only
+    -s  Grab no. of samples and subjects only (skip bucket size queries)
     -l  Only grab info for a list of datasets, usually those included in the upcoming Release
 
 EOF
