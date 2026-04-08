@@ -8,7 +8,7 @@ cat << EOF
   Track the ASAP raw/curated buckets, size, sample breakdown, and subject breakdown in the CRN Cloud.
   Note:
   - Raw bucket sizes include files that are used for development
-  - Storage size used for this project is much larger since unreleased data is stored in there as well and cross-team cohort data
+  - Storage size used in this project is larger than what is reported through this script since it does not account for unreleased data, cross-team cohort data, and DEV/UAT/other buckets
   - Sample and subject breakdown is ongoing as more data modalities are being added
   - Samples included in the same data assay/modality does NOT mean all samples went through curation
 
@@ -18,10 +18,12 @@ cat << EOF
 
   OPTIONS
     -h  Display this message and exit
-    -s  Grab no. of samples and subjects only
-    -i  A previously generated CRN Cloud Collection Summary TSV file to append to and skip during processing (Note: Use only if certain that earlier datasets have not been updated)
-    -l  A file containing a list of dataset_ids to process (one per line, e.g. team-hafler-pmdbs-sn-rnaseq-pfc). Slug is inferred by prepending "prod-". If not provided, all datasets in the CRN Cloud are processed.
-
+    -s  Grab no. of samples and subjects only (skip bucket size queries)
+    -i  A previously generated TSV to append to, skipping already-processed datasets (Note: Use only if certain that earlier datasets have not been updated)
+    -l  A file containing a list of dataset_ids to process, one per line (e.g. team-hafler-pmdbs-sn-rnaseq-pfc, cohort-pmdbs-sc-rnaseq).
+        Slug is inferred by prepending "prod-" to query the CRN Cloud.
+        team-* and cohort-* prefixes are used to classify individual vs. harmonized collections respectively.
+        If not provided, all datasets in the CRN Cloud are processed.
 EOF
 }
 
@@ -299,7 +301,7 @@ while IFS= read -r slug; do
                 "SELECT COUNT($subject_id_col) FROM \"collections\".\"$underscored_slug\".\"${team_name}_subject\"" \
                 | tr -d '[:space:]')
         else
-            echo "  No recognised subject ID column found in ${team_name}_subject, falling back to SAMPLE table" >&2
+            echo "  No recognized subject ID column found in ${team_name}_subject, falling back to SAMPLE table" >&2
             subject_count=$(query_collection "$slug" \
                 "SELECT COUNT(DISTINCT subject_id) FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"" \
                 | tr -d '[:space:]')
