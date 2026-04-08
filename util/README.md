@@ -265,7 +265,10 @@ Utility scripts for tracking ASAP dataset statistics across the CRN Cloud and in
 
 Queries the [CRN Cloud](https://cloud.parkinsonsroadmap.org) via the DNAstack CLI to report on published individual datasets and harmonized collections. For each dataset, it retrieves the associated GCP raw and curated buckets, their sizes, sample/subject counts, brain-specific statistics, and subject diagnosis breakdown.
 
-**Output:** `crn_cloud_collection_summary.<date>.tsv`
+**Output:**
+- `crn_cloud_collection_summary.<date>.tsv`
+- `brain_donor_dataset_membership.<date_str>.tsv` (excludes cohorts)
+- `subject_dataset_membership.<date_str>.tsv` (excludes cohorts)
 
 | Column | Description |
 |--------|-------------|

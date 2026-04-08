@@ -12,7 +12,10 @@ cat << EOF
   - Sample and subject breakdown is ongoing as more data modalities are being added
   - Samples included in the same data assay/modality does NOT mean all samples went through curation
 
-  Output: crn_cloud_collection_summary.<date_str>.tsv
+  Output:
+  - crn_cloud_collection_summary.<date_str>.tsv
+  - brain_donor_dataset_membership.<date_str>.tsv (excludes cohorts)
+  - subject_dataset_membership.<date_str>.tsv (excludes cohorts)
 
   Usage: $0 [OPTIONS]
 
@@ -24,6 +27,7 @@ cat << EOF
         Slug is inferred by prepending "prod-" to query the CRN Cloud.
         team-* and cohort-* prefixes are used to classify individual vs. harmonized collections respectively.
         If not provided, all datasets in the CRN Cloud are processed.
+
 EOF
 }
 
