@@ -234,6 +234,11 @@ def main(args):
                         }
                         projects[team_id]["pools"].append(pool_obj)
                     else:
+                        existing_pool["fastq_R1s"].extend(r for r in fastq_R1s if r not in existing_pool["fastq_R1s"])
+                        existing_pool["fastq_R2s"].extend(r for r in fastq_R2s if r not in existing_pool["fastq_R2s"])
+                        existing_pool["fastq_R3s"].extend(r for r in fastq_R3s if r not in existing_pool["fastq_R3s"])
+                        existing_pool["fastq_I1s"].extend(r for r in fastq_I1s if r not in existing_pool["fastq_I1s"])
+                        existing_pool["fastq_I2s"].extend(r for r in fastq_I2s if r not in existing_pool["fastq_I2s"])
                         existing_sample = existing_pool["samples"][0]
                         existing_sample["asap_subject_id"].append(asap_subject_id)
                         existing_sample["sample_id"].append(sample_id)
