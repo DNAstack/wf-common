@@ -12,6 +12,7 @@
 | [`promote_staging_data`](./promote_staging_data) | Promote staging data to production data buckets and apply the appropriate permissions. | Ability to run data integrity tests when trying to promote data from staging (i.e., DEV/UAT) to production buckets (i.e., CURATED). This script is only run for Minor and Major releases. It also applies the appropriate permissions to the buckets (e.g., adding Verily's ASAP Cloud Readers to released raw buckets) and removes the `internal-qc-data` label from the released raw buckets. The buckets/datasets are detected based on the workflow name provided and the workflow/pipeline version that's used to store current curated outputs in raw workflow_execution bucket. This dict, `unembargoed_dev_buckets_and_workflow_version_outputs`, is in `common.py` | `./promote_staging_data -w pmdbs_sc_rnaseq --release-version v4.0.0` |
 | [`markdown_generator.py`](./markdown_generator.py) | Functions that generate a Markdown report. | This script is used in the [`promote_staging_data`](./promote_staging_data) script to generate a Markdown report that contains data integrity results when trying to promote data from staging (i.e., DEV/UAT) to production buckets (i.e., CURATED). | NA |
 | [`crn_cloud_collection_summary`](./crn_cloud_collection_summary) | Track the ASAP raw/curated buckets, size, sample breakdown, and subject breakdown in the CRN Cloud. | See [CRN Cloud Statistics](#crn-cloud-statistics) below for more details. | `./crn_cloud_collection_summary` |
+| [`generate_dataset_summary_table`](./generate_dataset_summary_table) | Generate pivot tables of unique subject/sample counts and subject diagnosis counts by organism × tissue type × assay from CRN Cloud summary outputs. | Run after `crn_cloud_collection_summary` to produce summary tables for reporting. Reads from the Google Releases Sheet via `get_releases_df()`. | `python3 generate_dataset_summary_table crn_cloud_collection_summary.<date>.tsv subject_dataset_membership.<date>.tsv sample_dataset_membership.<date>.tsv subject_diagnosis_membership.<date>.tsv` |
 | [`internal_qc_dataset_collection_summary`](./internal_qc_dataset_collection_summary) | Track datasets in internal QC by getting their ASAP raw buckets, size, sample, and subject breakdown in GCP. | See [CRN Cloud Statistics](#crn-cloud-statistics) below for more details. | `./internal_qc_dataset_collection_summary` |
 | [`transfer_release_resources_to_raw_bucket.py`](./transfer_release_resources_to_raw_bucket.py) | Sync local release-resources config/, release_stats/ and publisher_cards/ to dataset ASAP raw buckets. | After producing Publisher card text and summary figures, this script syncs locally stored files (presumably living at asap-crn-cloud-dataset-metadata/) into each dataset gs:// raw bucket. If any later changes are made to the release-resources, this script will need to be re-run to ensure that the raw bucket contains the most up to date copies. | `./transfer_release_resources_to_raw_bucket.py -i /path/to/release_<release_version>.json -p` |
 | [`clean_wdl_raw_buckets`](./clean_wdl_raw_buckets) | Clean up script for GCP raw bucket workflow execution timestamp cohort analysis and downstream folders. | Removes outdated timestamp folder contents across all raw buckets in the cohort analysis and downstream folders while preserving versions. | `./clean_wdl_raw_buckets -p` |
@@ -263,9 +264,14 @@ Utility scripts for tracking ASAP dataset statistics across the CRN Cloud and in
 
 ### `crn_cloud_collection_summary`
 
-Queries the [CRN Cloud](https://cloud.parkinsonsroadmap.org) via the DNAstack CLI to report on all published individual datasets and harmonized collections. For each dataset, it retrieves the associated GCP raw and curated buckets, their sizes, and sample/subject counts. Additionally reports brain-specific statistics (sample count, region count, donor count) for datasets with PMDBS or CLINPATH tables.
+Queries the [CRN Cloud](https://cloud.parkinsonsroadmap.org) via the DNAstack CLI to report on published individual datasets and harmonized collections. For each dataset, it retrieves the associated GCP raw and curated buckets, their sizes, sample/subject counts, brain-specific statistics, and subject diagnosis breakdown.
 
-**Output:** `crn_cloud_collection_summary.<date>.tsv`
+**Output:**
+- `crn_cloud_collection_summary.<date>.tsv`
+- `subject_dataset_membership.<date>.tsv` — one row per subject-dataset pair (excludes cohorts)
+- `sample_dataset_membership.<date>.tsv` — one row per sample-dataset pair (excludes cohorts)
+- `brain_donor_dataset_membership.<date>.tsv` — one row per brain donor-dataset pair (excludes cohorts)
+- `subject_diagnosis_membership.<date>.tsv` — one row per subject-diagnosis-dataset pair, human datasets only (CLINPATH → SUBJECT → SAMPLE `condition_id` priority order)
 
 | Column | Description |
 |--------|-------------|
@@ -274,28 +280,73 @@ Queries the [CRN Cloud](https://cloud.parkinsonsroadmap.org) via the DNAstack CL
 | `gcp_raw_bucket_size` | Raw bucket size in bytes |
 | `gcp_curated_bucket` | GCS curated bucket URI |
 | `gcp_curated_bucket_size` | Curated bucket size in bytes |
-| `sample_count` | Distinct `asap_sample_id` count |
-| `subject_count` | Distinct `subject_id` count |
 | `team_name` | Contributing team name parsed from slug |
-| `brain_sample_count` | Brain samples from PMDBS table or `tissue` column |
-| `brain_region_count` | Distinct brain regions in PMDBS table |
-| `brain_donor_count` | Distinct donors in CLINPATH table |
+| `n_samples` | Distinct `asap_sample_id` + `modality` count from ASSAY table; falls back to `COUNT(DISTINCT asap_sample_id)` from SAMPLE |
+| `n_subjects` | Subject count from SUBJECT, MOUSE, or CELL table (whichever applies); falls back to `COUNT(DISTINCT subject_id)` from SAMPLE |
+| `n_brain_samples` | Brain sample count from PMDBS table, or from `tissue` column in SAMPLE if no PMDBS table |
+| `n_brain_regions` | Distinct brain regions in PMDBS table |
+| `n_brain_donors` | Distinct donors in CLINPATH table |
+| `n_subjects_<diagnosis>` | Subject count per primary diagnosis category (25 columns); sourced from CLINPATH or SUBJECT `primary_diagnosis` column; `0` if not applicable |
+| `condition_counts` | Raw condition value counts serialized as `condition:count\|...`; populated from SAMPLE `condition_id` or CONDITION `condition` when `primary_diagnosis` is not available |
 
 **Usage:**
-```
+```bash
 ./crn_cloud_collection_summary [OPTIONS]
 
 OPTIONS
   -h  Display this message and exit
   -s  Grab no. of samples and subjects only (skip bucket size queries)
-  -i  A previously generated TSV to append to, skipping already-processed datasets
-      (Note: Use only if certain that earlier datasets have not been updated)
+  -i  A previously generated TSV to append to, skipping already-processed datasets (Note: Use only if certain that earlier datasets have not been updated)
+  -l  A file containing a list of dataset_ids to process, one per line (e.g. team-hafler-pmdbs-sn-rnaseq-pfc, cohort-pmdbs-sc-rnaseq).
+      Slug is inferred by prepending "prod-" to query the CRN Cloud.
+      team-* and cohort-* prefixes are used to classify individual vs. harmonized collections respectively.
+      If not provided, all datasets in the CRN Cloud are processed.
 ```
 
 **Notes:**
 - Requires `dnastack` CLI authenticated to `cloud.parkinsonsroadmap.org` and `gcloud` with appropriate permissions
 - Raw bucket sizes include files used for development and may exceed what is strictly part of a release
+- Cohort collections (`cohort-*`) have their bucket derived from the slug (`gs://asap-raw-cohort-*`) rather than from the DATA table, which points to individual team buckets
+- `n_subjects` is sourced from the SUBJECT table (`asap_subject_id`), MOUSE table (`asap_mouse_id`), or CELL table (`asap_cell_id`), whichever applies; falls back to `COUNT(DISTINCT subject_id)` from SAMPLE
+- `n_samples` uses `COUNT(DISTINCT asap_sample_id, modality)` from ASSAY table if available, otherwise falls back to `COUNT(DISTINCT asap_sample_id)` from SAMPLE
+- `n_brain_donors` counts subjects in CLINPATH who also appear in PMDBS (via SAMPLE join) or have a non-null `region_level_1` in SAMPLE
+- Diagnosis counts (`n_subjects_*`) are sourced in priority order: CLINPATH → SUBJECT → SAMPLE `condition_id` → CONDITION `condition`; values not matching the fixed diagnosis vocabulary are captured in `condition_counts` instead
+- Subject and sample membership files contain one row per ID-dataset pair; global deduplication is performed by `generate_dataset_summary_table`
 - Use `-i` to incrementally update an existing summary file rather than reprocessing everything from scratch
+
+---
+
+---
+
+### `generate_dataset_summary_table`
+
+Generates pivot tables of unique subject/sample counts and subject diagnosis counts by organism × tissue type × assay. Reads dataset metadata (organism, sample source, assay) from the Google Releases Sheet via `get_releases_df()`, and joins with the membership files output by `crn_cloud_collection_summary` to deduplicate subjects and samples globally across datasets.
+
+**Input files** (all outputs of `crn_cloud_collection_summary`):
+- `crn_cloud_collection_summary.<date>.tsv`
+- `subject_dataset_membership.<date>.tsv`
+- `sample_dataset_membership.<date>.tsv`
+- `subject_diagnosis_membership.<date>.tsv`
+
+**Output:**
+- `dataset_summary_table.<date>.tsv` — pivot table of unique subjects/samples by organism × tissue type × assay
+- `dataset_summary_table.<date>.xlsx` — same table as Excel with merged organism headers (if `openpyxl` installed)
+- `subject_diagnosis_table.<date>.tsv` — pivot table of unique subject diagnosis counts, human datasets only
+
+**Usage:**
+```bash
+python3 generate_dataset_summary_table \
+    crn_cloud_collection_summary.<date>.tsv \
+    subject_dataset_membership.<date>.tsv \
+    sample_dataset_membership.<date>.tsv \
+    subject_diagnosis_membership.<date>.tsv
+```
+
+**Notes:**
+- Cohort slugs are excluded from all tables
+- Tissue type classification uses `sample_source` and `organism` from the Releases Sheet; datasets with non-standard values are flagged as warnings
+- `prod-team-scherzer-pmdbs-genetics` is hard-coded as Human / Brain tissue / Genetics due to a non-standard `assay` value in the sheet
+- Requires `gspread` credentials at `~/.config/gspread/credentials.json` (see [gspread setup](#set-up-for-pulling-data-from-live-google-spreadsheets-using-gspread))
 
 ---
 
@@ -314,13 +365,13 @@ Scans GCP directly for `asap-raw-team-*` buckets labelled `internal-qc-data` and
 | `subject_count` | Distinct `subject_id` count from `SAMPLE.csv` |
 
 **Usage:**
-```
+```bash
 ./internal_qc_dataset_collection_summary [OPTIONS]
 
 OPTIONS
   -h  Display this message and exit
   -s  Grab no. of samples and subjects only (skip bucket size queries)
-  -l  Path to a file listing specific dataset slugs to process (e.g. for an upcoming release)
+  -l  Only grab info for a list of datasets, usually those included in the upcoming Release
 ```
 
 **Notes:**

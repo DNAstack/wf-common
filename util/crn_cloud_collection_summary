@@ -8,47 +8,204 @@ cat << EOF
   Track the ASAP raw/curated buckets, size, sample breakdown, and subject breakdown in the CRN Cloud.
   Note:
   - Raw bucket sizes include files that are used for development
-  - Storage size used for this project is much larger since unreleased data is stored in there as well and cross-team cohort data
+  - Storage size used in this project is larger than what is reported through this script since it does not account for unreleased data, cross-team cohort data, and DEV/UAT/other buckets
   - Sample and subject breakdown is ongoing as more data modalities are being added
   - Samples included in the same data assay/modality does NOT mean all samples went through curation
 
-  Output: crn_cloud_collection_summary.<date_str>.tsv
+  Output:
+  - crn_cloud_collection_summary.<date_str>.tsv
+  - subject_dataset_membership.<date_str>.tsv (excludes cohorts)
+  - sample_dataset_membership.<date_str>.tsv (excludes cohorts)
+  - brain_donor_dataset_membership.<date_str>.tsv (excludes cohorts)
+  - subject_diagnosis_membership.<date_str>.tsv
 
   Usage: $0 [OPTIONS]
 
   OPTIONS
     -h  Display this message and exit
-    -s  Grab no. of samples and subjects only
-    -i  A previously generated CRN Cloud Collection Summary TSV file to append to and skip during processing (Note: Use only if certain that earlier datasets have not been updated)
+    -s  Grab no. of samples and subjects only (skip bucket size queries)
+    -i  A previously generated TSV to append to, skipping already-processed datasets (Note: Use only if certain that earlier datasets have not been updated)
+    -l  A file containing a list of dataset_ids to process, one per line (e.g. team-hafler-pmdbs-sn-rnaseq-pfc, cohort-pmdbs-sc-rnaseq).
+        Slug is inferred by prepending "prod-" to query the CRN Cloud.
+        team-* and cohort-* prefixes are used to classify individual vs. harmonized collections respectively.
+        If not provided, all datasets in the CRN Cloud are processed.
 
 EOF
 }
 
 SAMPLES_SUBJECTS_ONLY=false
 
-while getopts ":hsi:" OPTION; do
+while getopts ":hsi:l:" OPTION; do
   case ${OPTION} in
     h) usage; exit 1;;
     s) SAMPLES_SUBJECTS_ONLY=true;;
     i) PREVIOUS_CRN_SUMMARY_TSV=$OPTARG;;
+    l) DATASETS_FILE=$OPTARG;;
   esac
 done
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Run a dnastack SQL query against a collection and strip the CSV header row.
+# Usage: query_collection <slug> <sql>
+query_collection() {
+    local slug="$1"
+    local sql="$2"
+    dnastack collections query -c "$slug" "$sql" -o csv | tail -n +2
+}
+
+# Resolve a GCS raw bucket from a slug, trying DATA table first then slug-derived name.
+# Prints the gs:// bucket path on success; returns 1 if bucket cannot be found.
+# All logging goes to stderr so stdout is clean for capture by the caller.
+# Usage: get_bucket_from_slug <slug> <underscored_slug> <team_name> <collection_tables>
+get_bucket_from_slug() {
+    local slug="$1"
+    local underscored_slug="$2"
+    local team_name="$3"
+    local collection_tables="$4"
+
+    local bucket
+
+    if echo "$collection_tables" | grep -q "data"; then
+        local gcp_raw_uri
+        gcp_raw_uri=$(query_collection "$slug" \
+            "SELECT gcp_uri FROM \"collections\".\"$underscored_slug\".\"${team_name}_data\" LIMIT 1")
+        bucket=$(echo "$gcp_raw_uri" | cut -d'/' -f1-3)
+    fi
+
+    # Fall back to slug-derived name if DATA table missing or has no gs:// uri
+    if [[ "${bucket:-}" != gs://* ]] || [[ "${team_name}" == "cohort" ]] ; then
+        [[ "${bucket:-}" ]] && echo "  [$slug] DATA table has no gcp_uri, falling back to slug-derived bucket name" >&2
+        bucket=$(echo "$slug" | sed 's;prod-;gs://asap-raw-;g')
+    fi
+
+    if ! gcloud storage buckets describe "$bucket" >/dev/null 2>&1; then
+        echo "[WARNING] Bucket does NOT exist: [$bucket]; skipping" >&2
+        return 1
+    fi
+
+    echo "$bucket"
+}
+
+# From ASAP_CDE: https://docs.google.com/spreadsheets/d/1c0z5KvRELdT2AtQAH2Dus8kwAyyLrR0CROhKOjpU4Vc/edit?gid=43504703#gid=43504703
+# Fixed ordered list of known primary_diagnosis values (display name -> column name).
+DIAGNOSIS_COLS=(
+    "Healthy Control"
+    "Idiopathic PD"
+    "Alzheimer's disease"
+    "Frontotemporal dementia"
+    "Corticobasal syndrome"
+    "Dementia with Lewy bodies"
+    "Dopa-responsive dystonia"
+    "Essential tremor"
+    "Hemiparkinson/hemiatrophy syndrome"
+    "Juvenile autosomal recessive parkinsonism"
+    "Motor neuron disease with parkinsonism"
+    "Multiple system atrophy"
+    "Neuroleptic-induced parkinsonism"
+    "Normal pressure hydrocephalus"
+    "Progressive supranuclear palsy"
+    "Psychogenic parkinsonism"
+    "Vascular parkinsonism"
+    "No PD nor other neurological disorder"
+    "Spinocerebellar Ataxia (SCA)"
+    "Prodromal non-motor PD"
+    "Prodromal motor PD"
+    "Crohn's disease"
+    "Crohn's disease remission"
+    "Other neurological disorder"
+    "Other non-neurological disease or condition"
+)
+
+# Map display names to their n_ column names for lookup.
+DX_COLS=(
+    "n_subjects_healthy_control"
+    "n_subjects_idiopathic_pd"
+    "n_subjects_alzheimers_disease"
+    "n_subjects_frontotemporal_dementia"
+    "n_subjects_corticobasal_syndrome"
+    "n_subjects_dementia_with_lewy_bodies"
+    "n_subjects_dopa_responsive_dystonia"
+    "n_subjects_essential_tremor"
+    "n_subjects_hemiparkinson_hemiatrophy_syndrome"
+    "n_subjects_juvenile_autosomal_recessive_parkinsonism"
+    "n_subjects_motor_neuron_disease_with_parkinsonism"
+    "n_subjects_multiple_system_atrophy"
+    "n_subjects_neuroleptic_induced_parkinsonism"
+    "n_subjects_normal_pressure_hydrocephalus"
+    "n_subjects_progressive_supranuclear_palsy"
+    "n_subjects_psychogenic_parkinsonism"
+    "n_subjects_vascular_parkinsonism"
+    "n_subjects_no_pd_nor_other_neurological_disorder"
+    "n_subjects_spinocerebellar_ataxia_sca"
+    "n_subjects_prodromal_non_motor_pd"
+    "n_subjects_prodromal_motor_pd"
+    "n_subjects_crohns_disease"
+    "n_subjects_crohns_disease_remission"
+    "n_subjects_other_neurological_disorder"
+    "n_subjects_other_non_neurological_disease_or_condition"
+)
+
+# Write diagnosis labels to a temp file so awk can read them without quoting issues.
+_DIAG_LABELS_FILE=$(mktemp /tmp/diag_labels.XXXXXX)
+# trap updated below with subject ID temp files
+printf "%s\n" "${DIAGNOSIS_COLS[@]}" > "$_DIAG_LABELS_FILE"
+
+# Expand a dnastack CSV result (diagnosis, cnt columns) into tab-separated
+# counts in DIAGNOSIS_COLS order. Outputs 0 for any diagnosis not present.
+# Usage: expand_diagnosis_counts <csv_rows>
+expand_diagnosis_counts() {
+    local rows="$1"
+    printf "%s\n" "$rows" | awk -F',' -v labels_file="$_DIAG_LABELS_FILE" '
+    BEGIN {
+        while ((getline line < labels_file) > 0) order[++n] = line
+    }
+    NF >= 2 && $1 != "" { key = $1; gsub(/^"|"$/, "", key); val = $NF; gsub(/\r/, "", val); counts[key] = val }
+    END {
+        for (i = 1; i <= n; i++)
+            printf "%s", (i > 1 ? "\t" : "") (order[i] in counts ? counts[order[i]] : 0)
+    }
+    '
+}
+
+# ---------------------------------------------------------------------------
+
 dnastack use cloud.parkinsonsroadmap.org
-INDIVIDUAL_DATASETS=$(dnastack collections list | jq -r '.[] | select(.tags[]?.label == "Individual Dataset") | .slugName')
-COHORT_DATASETS=$(dnastack collections list | jq -r '.[] | select(.tags[]?.label == "Harmonized Collection") | .slugName')
+
+if [[ -n "${DATASETS_FILE:-}" ]]; then
+    echo "Reading dataset list from $DATASETS_FILE..."
+    if [[ ! -f "$DATASETS_FILE" ]]; then
+        echo "[ERROR] Datasets file not found: $DATASETS_FILE" >&2
+        exit 1
+    fi
+    # Infer slug by prepending "prod-" to each line; skip blank lines and comments.
+    # File order is preserved exactly as ALL_DATASETS_TO_PROCESS.
+    # INDIVIDUAL_DATASETS and COHORT_DATASETS are derived subsets used only for counts.
+    ALL_DATASETS_TO_PROCESS=$(grep -v '^[[:space:]]*$' "$DATASETS_FILE" | grep -v '^#' | sed 's/^/prod-/')
+    INDIVIDUAL_DATASETS=$(echo "$ALL_DATASETS_TO_PROCESS" | grep '^prod-team-' || true)
+    COHORT_DATASETS=$(echo "$ALL_DATASETS_TO_PROCESS"     | grep '^prod-cohort-' || true)
+else
+    echo "No dataset list provided; fetching all datasets from CRN Cloud..."
+    INDIVIDUAL_DATASETS=$(dnastack collections list | jq -r '.[] | select(.tags[]?.label == "Individual Dataset") | .slugName')
+    COHORT_DATASETS=$(dnastack collections list | jq -r '.[] | select(.tags[]?.label == "Harmonized Collection") | .slugName')
+    ALL_DATASETS_TO_PROCESS=$(printf "%s\n%s" "$INDIVIDUAL_DATASETS" "$COHORT_DATASETS" | sed "/^$/d")
+fi
 
 if [[ -n "${PREVIOUS_CRN_SUMMARY_TSV:-}" ]]; then
     echo "Skipping slugs already present in $PREVIOUS_CRN_SUMMARY_TSV"
     SLUG_COL=$(head -1 "$PREVIOUS_CRN_SUMMARY_TSV" | tr '\t' '\n' | grep -n "publisher_slug" | cut -d: -f1)
     PREVIOUS_SLUGS=$(tail -n +2 "$PREVIOUS_CRN_SUMMARY_TSV" | cut -f"$SLUG_COL")
-    INDIVIDUAL_DATASETS=$(comm -23 <(sort <<< "$INDIVIDUAL_DATASETS") <(sort <<< "$PREVIOUS_SLUGS"))
-    COHORT_DATASETS=$(comm -23 <(sort <<< "$COHORT_DATASETS") <(sort <<< "$PREVIOUS_SLUGS"))
+    # Filter already-processed slugs while preserving input order
+    ALL_DATASETS_TO_PROCESS=$(while IFS= read -r slug; do
+        echo "$PREVIOUS_SLUGS" | grep -qx "$slug" || echo "$slug"
+    done <<< "$ALL_DATASETS_TO_PROCESS")
 fi
 
-echo "Got "$(echo "$INDIVIDUAL_DATASETS" | wc -l | tr -d '[:space:]')" individual datasets from CRN Cloud"
-echo "Got "$(echo "$COHORT_DATASETS" | wc -l | tr -d '[:space:]')" harmonized collections from CRN Cloud"
+echo "Got $(echo "$INDIVIDUAL_DATASETS" | wc -l | tr -d '[:space:]') individual datasets to process"
+echo "Got $(echo "$COHORT_DATASETS" | wc -l | tr -d '[:space:]') harmonized collections to process"
 
 date_str=$(date +"%Y-%m-%d")
 if [[ -n "${PREVIOUS_CRN_SUMMARY_TSV:-}" ]]; then
@@ -56,11 +213,27 @@ if [[ -n "${PREVIOUS_CRN_SUMMARY_TSV:-}" ]]; then
     echo "Appending to existing file: $output_file"
 else
     output_file="crn_cloud_collection_summary.$date_str.tsv"
-    echo -e "publisher_slug\tgcp_raw_bucket\tgcp_raw_bucket_size\tgcp_curated_bucket\tgcp_curated_bucket_size\tsample_count\tsubject_count\tteam_name\tbrain_sample_count\tbrain_region_count\tbrain_donor_count" > "$output_file"
+    subject_membership_file="subject_dataset_membership.$date_str.tsv"
+    brain_donor_membership_file="brain_donor_dataset_membership.$date_str.tsv"
+    echo -e "subject_id\tpublisher_slug" > "$subject_membership_file"
+    echo -e "asap_subject_id\tpublisher_slug" > "$brain_donor_membership_file"
+    subject_diagnosis_membership_file="subject_diagnosis_membership.$date_str.tsv"
+    echo -e "asap_subject_id\tprimary_diagnosis\tpublisher_slug" > "$subject_diagnosis_membership_file"
+    sample_membership_file="sample_dataset_membership.$date_str.tsv"
+    echo -e "asap_sample_id\tpublisher_slug" > "$sample_membership_file"
+    echo -e "publisher_slug\tgcp_raw_bucket\tgcp_raw_bucket_size\tgcp_curated_bucket\tgcp_curated_bucket_size\tteam_name\tn_samples\tn_subjects\tn_brain_samples\tn_brain_regions\tn_brain_donors\tn_subjects_healthy_control\tn_subjects_idiopathic_pd\tn_subjects_alzheimers_disease\tn_subjects_frontotemporal_dementia\tn_subjects_corticobasal_syndrome\tn_subjects_dementia_with_lewy_bodies\tn_subjects_dopa_responsive_dystonia\tn_subjects_essential_tremor\tn_subjects_hemiparkinson_hemiatrophy_syndrome\tn_subjects_juvenile_autosomal_recessive_parkinsonism\tn_subjects_motor_neuron_disease_with_parkinsonism\tn_subjects_multiple_system_atrophy\tn_subjects_neuroleptic_induced_parkinsonism\tn_subjects_normal_pressure_hydrocephalus\tn_subjects_progressive_supranuclear_palsy\tn_subjects_psychogenic_parkinsonism\tn_subjects_vascular_parkinsonism\tn_subjects_no_pd_nor_other_neurological_disorder\tn_subjects_spinocerebellar_ataxia_sca\tn_subjects_prodromal_non_motor_pd\tn_subjects_prodromal_motor_pd\tn_subjects_crohns_disease\tn_subjects_crohns_disease_remission\tn_subjects_other_neurological_disorder\tn_subjects_other_non_neurological_disease_or_condition\tcondition_counts" > "$output_file"
 fi
 
 unique_teams=""
 unique_brain_regions=""
+
+# Temp files to collect subject IDs across all datasets for deduplication
+_HUMAN_IDS_FILE=$(mktemp /tmp/human_ids.XXXXXX)
+_MOUSE_IDS_FILE=$(mktemp /tmp/mouse_ids.XXXXXX)
+_CELL_IDS_FILE=$(mktemp /tmp/cell_ids.XXXXXX)
+_BRAIN_DONOR_IDS_FILE=$(mktemp /tmp/brain_donor_ids.XXXXXX)
+_SAMPLE_IDS_FILE=$(mktemp /tmp/sample_ids.XXXXXX)
+trap 'rm -f "$_DIAG_LABELS_FILE" "$_HUMAN_IDS_FILE" "$_MOUSE_IDS_FILE" "$_CELL_IDS_FILE" "$_BRAIN_DONOR_IDS_FILE" "$_SAMPLE_IDS_FILE"' EXIT
 
 while IFS= read -r slug; do
     underscored_slug="${slug//-/_}"
@@ -78,79 +251,143 @@ while IFS= read -r slug; do
     fi
 
     echo "Detected [$slug] for team [$team_name]..."
-    
+
     # Track unique teams
     if ! echo "$unique_teams" | grep -qw "$team_name"; then
         unique_teams="$unique_teams $team_name"
     fi
 
-    echo "Check if DATA table exists..."
+    echo "Fetching table list..."
     collection_tables=$(dnastack collections query -c "$slug" \
-        "SELECT table_name FROM collections.information_schema.tables 
+        "SELECT table_name FROM collections.information_schema.tables
         WHERE table_schema = '$underscored_slug'" \
         -o csv)
-    if ! echo "$collection_tables" | grep -q "data"; then
-        echo "DATA table does not exist, guessing raw bucket..."
+
+    # Cohort slugs have their own gs://asap-raw-cohort-* buckets — derive directly
+    # from the slug rather than reading gcp_uri from the DATA table (which points
+    # to individual team buckets, not the cohort bucket).
+    if [[ "${parts[1]}" == "cohort" ]]; then
         gcp_raw_bucket=$(echo "$slug" | sed 's;prod-;gs://asap-raw-;g')
-        if gcloud storage buckets describe "$gcp_raw_bucket" >/dev/null 2>&1; then
-            echo "Bucket exists; continuing"
-        else
-            echo "[WARNING] Bucket does NOT exist: ["$gcp_raw_bucket"]; skipping"
+        if ! gcloud storage buckets describe "$gcp_raw_bucket" >/dev/null 2>&1; then
+            echo "[WARNING] Cohort bucket does NOT exist: [$gcp_raw_bucket]; skipping" >&2
             continue
         fi
+        echo "Getting GCP curated bucket name"
+        gcp_prod_bucket="${gcp_raw_bucket/raw/curated}"
     else
-        echo "DATA table exists, getting GCP raw bucket name"
-        gcp_raw_uri=$(dnastack collections query -c "$slug" \
-            "SELECT gcp_uri FROM \"collections\".\"$underscored_slug\".\"${team_name}_data\" LIMIT 1" \
-            -o csv)
-        gcp_raw_bucket=$(echo "$gcp_raw_uri" | cut -d'/' -f1-3 | tail -n +2)
-        # Exception - some datasets do not have gs uri's in their DATA.csv
-        if [[ "$gcp_raw_bucket" != gs://* ]]; then
-            echo "[$slug] DATA.csv does not have gcp_uri"
-            echo "Trying to grab bucket name from slug..."
-            gcp_raw_bucket=$(echo "$slug" | sed 's;prod-;gs://asap-raw-;g')
-            if gcloud storage buckets describe "$gcp_raw_bucket" >/dev/null 2>&1; then
-                echo "Bucket exists; continuing"
-            else
-                echo "[WARNING] Bucket does NOT exist: ["$gcp_raw_bucket"]; skipping"
-                continue
+        gcp_raw_bucket=$(get_bucket_from_slug "$slug" "$underscored_slug" "$team_name" "$collection_tables") || continue
+        echo "Getting GCP curated bucket name"
+        gcp_prod_bucket="${gcp_raw_bucket/raw/curated}"
+    fi
+
+    echo "Getting # of samples"
+    if echo "$collection_tables" | grep -qi "${team_name}_assay"; then
+        echo "  ASSAY table found, counting distinct asap_sample_id + modality..."
+        sample_count=$(dnastack collections query -c "$slug" \
+            "SELECT COUNT(*) FROM (
+                SELECT DISTINCT asap_sample_id, modality
+                FROM \"collections\".\"$underscored_slug\".\"${team_name}_assay\"
+            )" \
+            -o csv 2>/dev/null | tail -n +2 | tr -d '[:space:]' || true)
+    fi
+    if [[ -z "$sample_count" ]] || [[ ! "$sample_count" =~ ^[0-9]+$ ]]; then
+        echo "  Falling back to COUNT(DISTINCT asap_sample_id) from SAMPLE table..."
+        sample_count=$(query_collection "$slug" \
+            "SELECT COUNT(DISTINCT asap_sample_id) FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"" \
+            | tr -d '[:space:]')
+    fi
+
+    # Count subjects from SUBJECT table using whichever ID column exists
+    echo "Getting # of subjects from SUBJECT table..."
+    if echo "$collection_tables" | grep -qi "${team_name}_subject"; then
+        subject_id_col=$(dnastack collections query -c "$slug" \
+            "SELECT column_name FROM collections.information_schema.columns
+            WHERE table_schema = '$underscored_slug'
+              AND table_name = '${team_name}_subject'
+              AND (column_name = 'asap_subject_id' OR column_name = 'asap_mouse_id' OR column_name = 'asap_cell_id')
+            LIMIT 1" \
+            -o csv | tail -n +2 | tr -d '[:space:],"')
+        if [[ -n "$subject_id_col" ]]; then
+            subject_count=$(query_collection "$slug" \
+                "SELECT COUNT($subject_id_col) FROM \"collections\".\"$underscored_slug\".\"${team_name}_subject\"" \
+                | tr -d '[:space:]')
+        else
+            echo "  No recognized subject ID column found in ${team_name}_subject, falling back to SAMPLE table" >&2
+            subject_count=$(query_collection "$slug" \
+                "SELECT COUNT(DISTINCT subject_id) FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"" \
+                | tr -d '[:space:]')
+        fi
+    else
+        echo "  No SUBJECT table found, falling back to SAMPLE table" >&2
+        subject_count=$(query_collection "$slug" \
+            "SELECT COUNT(DISTINCT subject_id) FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"" \
+            | tr -d '[:space:]')
+    fi
+
+    # Collect subject IDs for global deduplication.
+    # Try each ID type in order — first match wins for this dataset.
+    # For each type, check the dedicated table first, then SUBJECT as fallback.
+    if [[ "${parts[1]}" != "cohort" ]]; then
+        _collected=false
+        for _id_spec in "asap_subject_id:human:${team_name}_sample:${team_name}_subject" \
+                        "asap_mouse_id:mouse:${team_name}_sample:${team_name}_mouse" \
+                        "asap_cell_id:cell:${team_name}_sample:${team_name}_cell"; do
+            _id_col=$(echo "$_id_spec" | cut -d: -f1)
+            _origin=$(echo  "$_id_spec" | cut -d: -f2)
+            _tables=$(echo  "$_id_spec" | cut -d: -f3-)
+            if [[ "$_id_col" == "asap_subject_id" ]]; then _dest_file="$_HUMAN_IDS_FILE"
+            elif [[ "$_id_col" == "asap_mouse_id" ]]; then _dest_file="$_MOUSE_IDS_FILE"
+            else _dest_file="$_CELL_IDS_FILE"; fi
+            IFS=: read -ra _src_tables <<< "$_tables"
+            for _src_table in "${_src_tables[@]}"; do
+                if ! echo "$collection_tables" | grep -qi "$_src_table"; then continue; fi
+                dnastack collections query -c "$slug" \
+                    "SELECT DISTINCT $_id_col FROM \"collections\".\"$underscored_slug\".\"${_src_table}\"
+                    WHERE $_id_col IS NOT NULL" \
+                    -o csv 2>/dev/null | tail -n +2 | tr -d '\r,"' | grep -v '^$' > /tmp/_ids_tmp.txt 2>/dev/null || true
+                if [[ -s /tmp/_ids_tmp.txt ]]; then
+                    cat /tmp/_ids_tmp.txt >> "$_dest_file"
+                    while IFS= read -r _id; do
+                        printf "%s\t%s\n" "$_id" "$slug" >> "$subject_membership_file"
+                    done < /tmp/_ids_tmp.txt
+                    _collected=true
+                    break 2
+                fi
+            done
+        done
+    fi
+
+    # Collect sample IDs for global deduplication
+    if [[ "${parts[1]}" != "cohort" ]]; then
+        if echo "$collection_tables" | grep -qi "${team_name}_sample"; then
+            dnastack collections query -c "$slug" \
+                "SELECT DISTINCT asap_sample_id FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"
+                WHERE asap_sample_id IS NOT NULL" \
+                -o csv 2>/dev/null | tail -n +2 | tr -d '\r,"' | grep -v '^$' > /tmp/_sample_ids_tmp.txt 2>/dev/null || true
+            if [[ -s /tmp/_sample_ids_tmp.txt ]]; then
+                cat /tmp/_sample_ids_tmp.txt >> "$_SAMPLE_IDS_FILE"
+                while IFS= read -r _sid; do
+                    printf "%s\t%s\n" "$_sid" "$slug" >> "$sample_membership_file"
+                done < /tmp/_sample_ids_tmp.txt
             fi
         fi
     fi
 
-    echo "Getting GCP curated bucket name"
-    gcp_prod_bucket=$(echo $gcp_raw_bucket | sed 's/raw/curated/g')
-
-    echo "Getting # of samples"
-    sample_count=$(dnastack collections query -c "$slug" \
-        "SELECT COUNT(DISTINCT asap_sample_id) AS sample_count FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"" \
-        -o csv \
-        | tail -n +2 | tr -d '[:space:]')
-
-    echo "Getting # of subjects"
-    subject_count=$(dnastack collections query -c "$slug" \
-        "SELECT COUNT(DISTINCT subject_id) AS subject_count FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"" \
-        -o csv \
-        | tail -n +2 | tr -d '[:space:]')
-
-    # Check for PMDBS table, CLINPATH table, and get brain-specific stats
+    # Brain-specific stats
     brain_sample_count="NA"
     brain_region_count="NA"
 
     echo "Checking for PMDBS table..."
     if echo "$collection_tables" | grep -qi "pmdbs"; then
         echo "PMDBS table found, getting brain sample count..."
-        brain_sample_count=$(dnastack collections query -c "$slug" \
-            "SELECT COUNT(DISTINCT asap_sample_id) AS brain_sample_count FROM \"collections\".\"$underscored_slug\".\"${team_name}_pmdbs\"" \
-            -o csv \
-            | tail -n +2 | tr -d '[:space:]')
-        echo "PMDBS brain sample count: $brain_sample_count"
-        
+        brain_sample_count=$(query_collection "$slug" \
+            "SELECT COUNT(DISTINCT asap_sample_id) FROM \"collections\".\"$underscored_slug\".\"${team_name}_pmdbs\"" \
+            | tr -d '[:space:]')
+        echo "PMDBS brain sample count: [$brain_sample_count"]
+
         echo "Getting unique brain regions..."
-        brain_regions=$(dnastack collections query -c "$slug" \
-            "SELECT DISTINCT brain_region FROM \"collections\".\"$underscored_slug\".\"${team_name}_pmdbs\" WHERE brain_region IS NOT NULL" \
-            -o csv \
-            | tail -n +2)
+        brain_regions=$(query_collection "$slug" \
+            "SELECT DISTINCT brain_region FROM \"collections\".\"$underscored_slug\".\"${team_name}_pmdbs\" WHERE brain_region IS NOT NULL")
         region_count=0
         while IFS= read -r region; do
             if [[ -n "$region" ]]; then
@@ -164,10 +401,9 @@ while IFS= read -r slug; do
         echo "Brain region count for this collection: [$brain_region_count]"
     else
         echo "No PMDBS table found, checking SAMPLE table for brain tissue..."
-        brain_tissue_count=$(dnastack collections query -c "$slug" \
+        brain_tissue_count=$(query_collection "$slug" \
             "SELECT COUNT(DISTINCT asap_sample_id) FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\" WHERE LOWER(tissue) LIKE '%brain%'" \
-            -o csv \
-            | tail -n +2 | tr -d '[:space:]')
+            | tr -d '[:space:]')
         if [[ "$brain_tissue_count" =~ ^[0-9]+$ ]] && [[ "$brain_tissue_count" -gt 0 ]]; then
             brain_sample_count=$brain_tissue_count
             echo "Found [$brain_sample_count] brain samples from SAMPLE.tissue column"
@@ -181,13 +417,155 @@ while IFS= read -r slug; do
     echo "Checking for CLINPATH table..."
     if echo "$collection_tables" | grep -qi "clinpath"; then
         echo "CLINPATH table found, getting brain donor count..."
-        brain_donor_count=$(dnastack collections query -c "$slug" \
-            "SELECT COUNT(DISTINCT subject_id) AS brain_donor_count FROM \"collections\".\"$underscored_slug\".\"${team_name}_clinpath\"" \
-            -o csv \
-            | tail -n +2 | tr -d '[:space:]')
-        echo "Brain donor count: $brain_donor_count"
+        # Brain donors = subjects in CLINPATH who also appear in PMDBS
+        # OR have a non-null region_level_1 in SAMPLE
+        _has_pmdbs=false
+        _has_region=false
+        echo "$collection_tables" | grep -qi "${team_name}_pmdbs" && _has_pmdbs=true
+        if echo "$collection_tables" | grep -qi "${team_name}_sample"; then
+            _region_check=$(dnastack collections query -c "$slug" \
+                "SELECT COUNT(*) FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"
+                WHERE region_level_1 IS NOT NULL" \
+                -o csv 2>/dev/null | tail -n +2 | tr -d '[:space:]' || echo 0)
+            [[ "${_region_check:-0}" -gt 0 ]] && _has_region=true
+        fi
+
+        if ! "$_has_pmdbs" && ! "$_has_region"; then
+            echo "  No PMDBS table or region_level_1 found — skipping brain donor collection"
+        else
+            # Build the brain donor query: CLINPATH subjects intersected with PMDBS or SAMPLE.region_level_1
+            if "$_has_pmdbs"; then
+                _donor_sql="SELECT DISTINCT c.asap_subject_id
+                    FROM \"collections\".\"$underscored_slug\".\"${team_name}_clinpath\" c
+                    INNER JOIN \"collections\".\"$underscored_slug\".\"${team_name}_sample\" s
+                      ON c.asap_subject_id = s.asap_subject_id
+                    INNER JOIN \"collections\".\"$underscored_slug\".\"${team_name}_pmdbs\" p
+                      ON s.asap_sample_id = p.asap_sample_id
+                    WHERE c.asap_subject_id IS NOT NULL"
+            else
+                _donor_sql="SELECT DISTINCT c.asap_subject_id
+                    FROM \"collections\".\"$underscored_slug\".\"${team_name}_clinpath\" c
+                    INNER JOIN \"collections\".\"$underscored_slug\".\"${team_name}_sample\" s
+                      ON c.asap_subject_id = s.asap_subject_id
+                    WHERE c.asap_subject_id IS NOT NULL
+                      AND s.region_level_1 IS NOT NULL"
+            fi
+            dnastack collections query -c "$slug" "$_donor_sql" \
+                -o csv 2>/dev/null | tail -n +2 | tr -d '\r,"' | grep -v '^$' > /tmp/_donor_ids_tmp.txt || true
+            brain_donor_count=$(wc -l < /tmp/_donor_ids_tmp.txt | tr -d '[:space:]')
+            echo "Brain donor count: [$brain_donor_count"]
+            if [[ -s /tmp/_donor_ids_tmp.txt ]]; then
+                cat /tmp/_donor_ids_tmp.txt >> "$_BRAIN_DONOR_IDS_FILE"
+                while IFS= read -r _id; do
+                    printf "%s\t%s\n" "$_id" "$slug" >> "$brain_donor_membership_file"
+                done < /tmp/_donor_ids_tmp.txt
+            fi
+        fi
     else
         echo "No CLINPATH table found for this collection"
+    fi
+
+    # Primary diagnosis counts — try sources in priority order:
+    #   1. CLINPATH.primary_diagnosis         (human/PMDBS)
+    #   2. SAMPLE.condition_id per asap_subject_id
+    #   3. CONDITION.condition
+    # Default to all zeros
+    primary_diagnosis_counts=$(printf '0'; for i in $(seq 2 25); do printf '\t0'; done)
+    condition_counts="NA"
+
+    echo "Checking for primary_diagnosis / condition data..."
+
+    # ── 1. CLINPATH or SUBJECT.primary_diagnosis ────────────────────────────
+    for diag_src_table in "${team_name}_clinpath" "${team_name}_subject"; do
+        if echo "$collection_tables" | grep -qi "$diag_src_table"; then
+            echo "  Querying primary_diagnosis from ${diag_src_table}..."
+            diag_rows=$(dnastack collections query -c "$slug" \
+                "SELECT primary_diagnosis, COUNT(*) AS cnt
+                FROM \"collections\".\"$underscored_slug\".\"${diag_src_table}\"
+                WHERE primary_diagnosis IS NOT NULL
+                GROUP BY primary_diagnosis
+                ORDER BY primary_diagnosis" \
+                -o csv 2>/dev/null | tail -n +2 | tr -d '\r' || true)
+            if [[ -n "$diag_rows" ]]; then
+                primary_diagnosis_counts=$(expand_diagnosis_counts "$diag_rows")
+                condition_counts=$(echo "$diag_rows" | awk -F',' 'NF>=2 && $1!="" {gsub(/^"|"$/,"",$1); printf "%s:%s|", $1, $NF}' | sed 's/|$//')
+                # Collect per-subject diagnosis for human datasets only
+                if [[ "$gcp_raw_bucket" == *"human"* ]] || [[ "$gcp_raw_bucket" == *"pmdbs"* ]]; then
+                    dnastack collections query -c "$slug" \
+                        "SELECT asap_subject_id, primary_diagnosis
+                        FROM \"collections\".\"$underscored_slug\".\"${diag_src_table}\"
+                        WHERE asap_subject_id IS NOT NULL AND primary_diagnosis IS NOT NULL" \
+                        -o csv 2>/dev/null | tail -n +2 | tr -d '\r' | grep -v '^$' > /tmp/_diag_mem_tmp.txt || true
+                    if [[ -s /tmp/_diag_mem_tmp.txt ]]; then
+                        while IFS=',' read -r _subj _dx; do
+                            _subj=$(echo "$_subj" | tr -d '"')
+                            _dx=$(echo "$_dx" | tr -d '"')
+                            printf "%s\t%s\t%s\n" "$_subj" "$_dx" "$slug" >> "$subject_diagnosis_membership_file"
+                        done < /tmp/_diag_mem_tmp.txt
+                    fi
+                fi
+                break
+            fi
+        fi
+    done
+
+    # ── 2. SAMPLE.condition_id per subject ID column ────────────────────────
+    if [[ -z "$(echo "$primary_diagnosis_counts" | tr -d '0\t')" ]]; then
+        if echo "$collection_tables" | grep -qi "${team_name}_sample"; then
+            # Try each subject ID column until one works
+            for sample_subject_id_col in asap_subject_id asap_mouse_id asap_cell_id; do
+                diag_rows=$(query_collection "$slug" \
+                    "SELECT condition_id, COUNT(DISTINCT $sample_subject_id_col) AS cnt
+                    FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"
+                    WHERE condition_id IS NOT NULL
+                    GROUP BY condition_id
+                    ORDER BY condition_id" 2>/dev/null | tr -d '\r' || true)
+                if [[ -n "$diag_rows" ]]; then
+                    echo "  Querying condition_id from ${team_name}_sample (per $sample_subject_id_col)..."
+                    primary_diagnosis_counts=$(expand_diagnosis_counts "$diag_rows")
+                    condition_counts=$(echo "$diag_rows" | awk -F',' 'NF>=2 && $1!="" {gsub(/^"|"$/,"",$1); printf "%s:%s|", $1, $NF}' | sed 's/|$//')
+                    if [[ -z "$(echo "$primary_diagnosis_counts" | tr -d '0\t')" ]]; then
+                        echo "  [INFO] condition_id values not in diagnosis vocab — raw counts: $condition_counts" >&2
+                    fi
+                    # Collect per-subject condition_id for human datasets only
+                    if [[ "$gcp_raw_bucket" == *"human"* ]] || [[ "$gcp_raw_bucket" == *"pmdbs"* ]]; then
+                        dnastack collections query -c "$slug" \
+                            "SELECT DISTINCT $sample_subject_id_col, condition_id
+                            FROM \"collections\".\"$underscored_slug\".\"${team_name}_sample\"
+                            WHERE $sample_subject_id_col IS NOT NULL AND condition_id IS NOT NULL" \
+                            -o csv 2>/dev/null | tail -n +2 | tr -d '\r' | grep -v '^$' > /tmp/_diag_mem_tmp.txt || true
+                        if [[ -s /tmp/_diag_mem_tmp.txt ]]; then
+                            while IFS=',' read -r _subj _dx; do
+                                _subj=$(echo "$_subj" | tr -d '"')
+                                _dx=$(echo "$_dx" | tr -d '"')
+                                printf "%s\t%s\t%s\n" "$_subj" "$_dx" "$slug" >> "$subject_diagnosis_membership_file"
+                            done < /tmp/_diag_mem_tmp.txt
+                        fi
+                    fi
+                    break
+                fi
+            done
+        fi
+    fi
+
+    # ── 3. CONDITION.condition ──────────────────────────────────────────────
+    if [[ -z "$(echo "$primary_diagnosis_counts" | tr -d '0\t')" ]]; then
+        if echo "$collection_tables" | grep -qi "${team_name}_condition"; then
+            echo "  Querying condition from ${team_name}_condition..."
+            diag_rows=$(query_collection "$slug" \
+                "SELECT condition, COUNT(*) AS cnt
+                FROM \"collections\".\"$underscored_slug\".\"${team_name}_condition\"
+                WHERE condition IS NOT NULL
+                GROUP BY condition
+                ORDER BY condition" 2>/dev/null | tr -d '\r' || true)
+            if [[ -n "$diag_rows" ]]; then
+                primary_diagnosis_counts=$(expand_diagnosis_counts "$diag_rows")
+                condition_counts=$(echo "$diag_rows" | awk -F',' 'NF>=2 && $1!="" {gsub(/^"|"$/,"",$1); printf "%s:%s|", $1, $NF}' | sed 's/|$//')
+                if [[ -z "$(echo "$primary_diagnosis_counts" | tr -d '0\t')" ]]; then
+                    echo "  [INFO] condition values not in diagnosis vocab — raw counts: $condition_counts" >&2
+                fi
+            fi
+        fi
     fi
 
     if "${SAMPLES_SUBJECTS_ONLY}"; then
@@ -201,24 +579,33 @@ while IFS= read -r slug; do
         gcp_prod_bucket_size=$(gcloud storage du -s "$gcp_prod_bucket" | grep -oE '^[0-9]+')
     fi
 
+    # Leading \n only needed when appending to an existing file
     if [[ -n "${PREVIOUS_CRN_SUMMARY_TSV:-}" ]]; then
-        echo -e "\n${slug}\t${gcp_raw_bucket}\t${gcp_raw_bucket_size}\t${gcp_prod_bucket}\t${gcp_prod_bucket_size}\t${sample_count}\t${subject_count}\t${team_name}\t${brain_sample_count}\t${brain_region_count}\t${brain_donor_count}" >> "$output_file"
-    else
-        echo -e "${slug}\t${gcp_raw_bucket}\t${gcp_raw_bucket_size}\t${gcp_prod_bucket}\t${gcp_prod_bucket_size}\t${sample_count}\t${subject_count}\t${team_name}\t${brain_sample_count}\t${brain_region_count}\t${brain_donor_count}" >> "$output_file"
+        printf "\n" >> "$output_file"
     fi
-done <<< "$INDIVIDUAL_DATASETS"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t" \
+        "$slug" "$gcp_raw_bucket" "$gcp_raw_bucket_size" \
+        "$gcp_prod_bucket" "$gcp_prod_bucket_size" \
+        "$team_name" "$sample_count" "$subject_count" \
+        "$brain_sample_count" "$brain_region_count" "$brain_donor_count" >> "$output_file"
+    printf "%s\t%s\n" "$primary_diagnosis_counts" "$condition_counts" >> "$output_file"
+done <<< "$ALL_DATASETS_TO_PROCESS"
 
 # Clean up
 sed "s/[[:space:]]*$//" "$output_file" | tr -d "\r" > temp.tsv && mv temp.tsv "$output_file"
 
+# ---------------------------------------------------------------------------
+# Summary calculations (all read from the TSV, no more dnastack calls)
+# ---------------------------------------------------------------------------
+
 calculate_breakdown() {
     local output_file="$1"
-    local count_type="$2"  # "sample" or "subject"
-    
+    local count_type="$2"
+
     echo "Calculating the ${count_type} breakdown"
     awk -F'\t' -v count_type="$count_type" '
     NR==1 {
-        count_col_name = count_type "_count"
+        count_col_name = (count_type == "sample") ? "n_samples" : "n_subjects"
         for (i=1; i<=NF; i++) {
             if ($i == count_col_name) count_col = i
             if ($i == "gcp_raw_bucket") bucket_col = i
@@ -229,7 +616,7 @@ calculate_breakdown() {
         count = $count_col
         bucket = $bucket_col
         total_count += count
-        
+
         # Data assay/modality grouping logic
         if (bucket ~ /sc-rnaseq/ || bucket ~ /sn-rnaseq/) {
             grp["sc_sn"] += count
@@ -249,7 +636,7 @@ calculate_breakdown() {
             grp["other"] += count
             other_buckets[bucket] = 1
         }
-        
+
         # Data origin grouping logic
         if (bucket ~ /human/ || bucket ~ /pmdbs/) {
             origin["human"] += count
@@ -266,7 +653,7 @@ calculate_breakdown() {
         printf "=== %s COUNT SUMMARY ===\n", toupper(count_type)
         printf "Total %ss: %d\n", count_type, total_count
         print ""
-        
+
         print "=== BREAKDOWN BY DATA TYPE ==="
         printf "sc/sn RNAseq: %d\n", grp["sc_sn"]
         printf "bulk RNAseq:  %d\n", grp["bulk"]
@@ -277,27 +664,23 @@ calculate_breakdown() {
         printf "metagenomics: %d\n", grp["metagenomics"]
         printf "other:        %d\n", grp["other"]
         print ""
-        
+
         print "=== BUCKETS IN \"OTHER\" DATA MODALITY GROUP ==="
         if (length(other_buckets) > 0) {
-            for (b in other_buckets) {
-                print b
-            }
+            for (b in other_buckets) print b
             print ""
         }
-        
+
         printf "=== %s ORIGIN BREAKDOWN ===\n", toupper(count_type)
         printf "human:        %d\n", origin["human"]
         printf "mouse:        %d\n", origin["mouse"]
         printf "cell:         %d\n", origin["cell"]
         printf "other:        %d\n", origin["other"]
         print ""
-        
+
         print "=== BUCKETS IN \"OTHER\" ORIGIN GROUP ==="
         if (length(origin_other_buckets) > 0) {
-            for (b in origin_other_buckets) {
-                print b
-            }
+            for (b in origin_other_buckets) print b
         }
     }
     ' "$output_file"
@@ -319,17 +702,14 @@ if ! "${SAMPLES_SUBJECTS_ONLY}"; then
         }
         next
     }
-
     NR>1 {
         if (raw_col > 0) total_raw += $raw_col
         if (prod_col > 0) total_prod += $prod_col
     }
-
     END {
-        tb_raw  = total_raw  / (1024^4)
-        tb_prod = total_prod / (1024^4)
+        tb_raw   = total_raw  / (1024^4)
+        tb_prod  = total_prod / (1024^4)
         tb_grand = (total_raw + total_prod) / (1024^4)
-
         print "=== BUCKET SIZE SUMMARY ==="
         printf "Total raw size (TB):   %.1f\n", tb_raw
         printf "Total prod size (TB):  %.1f\n", tb_prod
@@ -337,15 +717,15 @@ if ! "${SAMPLES_SUBJECTS_ONLY}"; then
     }' "$output_file"
 fi
 
-# Calculate brain sample totals by origin and brain donors from output file
+# Brain sample totals
 echo ""
 echo "========================================"
 awk -F'\t' '
 NR==1 {
     for(i=1;i<=NF;i++) {
-        if($i=="brain_sample_count") brain_col=i
-        if($i=="brain_donor_count") donor_col=i
-        if($i=="gcp_raw_bucket") bucket_col=i
+        if($i=="n_brain_samples") brain_col=i
+        if($i=="n_brain_donors")  donor_col=i
+        if($i=="gcp_raw_bucket")     bucket_col=i
     }
     next
 }
@@ -354,22 +734,27 @@ NR>1 {
         brain_count = $brain_col
         bucket = $bucket_col
         total_brain += brain_count
-        
-        # Data origin grouping logic (same as sample/subject breakdown)
-        if (bucket ~ /human/ || bucket ~ /pmdbs/) {
+        if (bucket ~ /human/ || bucket ~ /pmdbs/)
             origin["human"] += brain_count
-        } else if (bucket ~ /mouse/ || bucket ~ /sulzer-fecal-metagenome-fp-spf/) {
+        else if (bucket ~ /mouse/ || bucket ~ /sulzer-fecal-metagenome-fp-spf/)
             origin["mouse"] += brain_count
-        } else if (bucket ~ /cell/ || bucket ~ /invitro/ || bucket ~ /ipsc/ || bucket ~ /mef/) {
+        else if (bucket ~ /cell/ || bucket ~ /invitro/ || bucket ~ /ipsc/ || bucket ~ /mef/)
             origin["cell"] += brain_count
-        } else {
+        else
             origin["other"] += brain_count
-        }
     }
-    
-    # Count brain donors
     if (donor_col > 0 && $donor_col!="NA" && $donor_col~/^[0-9]+$/) {
-        total_donors += $donor_col
+        donor_count = $donor_col
+        bucket = $bucket_col
+        total_donors += donor_count
+        if (bucket ~ /human/ || bucket ~ /pmdbs/)
+            donor_origin["human"] += donor_count
+        else if (bucket ~ /mouse/ || bucket ~ /sulzer-fecal-metagenome-fp-spf/)
+            donor_origin["mouse"] += donor_count
+        else if (bucket ~ /cell/ || bucket ~ /invitro/ || bucket ~ /ipsc/ || bucket ~ /mef/)
+            donor_origin["cell"] += donor_count
+        else
+            donor_origin["other"] += donor_count
     }
 }
 END {
@@ -380,8 +765,63 @@ END {
     printf "other:        %d\n", origin["other"]
     printf "Total brain samples: %d\n", total_brain
     print ""
+    print "=== BRAIN DONOR ORIGIN BREAKDOWN ==="
+    printf "human:        %d\n", donor_origin["human"]
+    printf "mouse:        %d\n", donor_origin["mouse"]
+    printf "cell:         %d\n", donor_origin["cell"]
+    printf "other:        %d\n", donor_origin["other"]
     printf "Total brain donors (CLINPATH): %d\n", total_donors
 }' "$output_file"
+n_unique_donors=$(sort -u "$_BRAIN_DONOR_IDS_FILE" 2>/dev/null | grep -cv '^$' || true)
+n_unique_donors=${n_unique_donors:-0}
+printf "Unique brain donors across all datasets: %d\n" "$n_unique_donors"
+n_unique_samples=$(sort -u "$_SAMPLE_IDS_FILE" 2>/dev/null | grep -cv '^$' || true)
+n_unique_samples=${n_unique_samples:-0}
+printf "Unique samples across all team datasets: %d\n" "$n_unique_samples"
+
+echo ""
+echo "========================================"
+echo "=== SUBJECT ORIGIN BREAKDOWN ==="
+n_human_unique=$(sort -u "$_HUMAN_IDS_FILE" 2>/dev/null | grep -cv '^$' || true)
+n_mouse_unique=$(sort -u "$_MOUSE_IDS_FILE" 2>/dev/null | grep -cv '^$' || true)
+n_cell_unique=$(sort -u  "$_CELL_IDS_FILE"  2>/dev/null | grep -cv '^$' || true)
+n_human_unique=${n_human_unique:-0}
+n_mouse_unique=${n_mouse_unique:-0}
+n_cell_unique=${n_cell_unique:-0}
+n_total_unique=$(( n_human_unique + n_mouse_unique + n_cell_unique ))
+awk -F'\t' -v n_human_unique="$n_human_unique" -v n_mouse_unique="$n_mouse_unique" \
+            -v n_cell_unique="$n_cell_unique"   -v n_total_unique="$n_total_unique" '
+NR==1 {
+    for (i=1; i<=NF; i++) {
+        if ($i == "n_subjects")     subj_col = i
+        if ($i == "gcp_raw_bucket") bucket_col = i
+    }
+    next
+}
+NR>1 {
+    if (subj_col > 0 && $subj_col ~ /^[0-9]+$/ && $subj_col+0 > 0) {
+        count = $subj_col+0
+        bucket = $bucket_col
+        total += count
+        if (bucket ~ /human/ || bucket ~ /pmdbs/)
+            origin["human"] += count
+        else if (bucket ~ /mouse/ || bucket ~ /sulzer-fecal-metagenome-fp-spf/)
+            origin["mouse"] += count
+        else if (bucket ~ /cell/ || bucket ~ /invitro/ || bucket ~ /ipsc/ || bucket ~ /mef/)
+            origin["cell"] += count
+        else
+            origin["other"] += count
+    }
+}
+END {
+    printf "%-30s %10s %10s\n", "", "all", "unique"
+    printf "%-30s %10d %10d\n", "human (asap_subject_id):", origin["human"], n_human_unique
+    printf "%-30s %10d %10d\n", "mouse (asap_mouse_id):",   origin["mouse"], n_mouse_unique
+    printf "%-30s %10d %10d\n", "cell  (asap_cell_id):",    origin["cell"],  n_cell_unique
+    printf "%-30s %10d %10d\n", "other:",                   origin["other"], 0
+    printf "%-30s %10d %10d\n", "Total:",                   total,           n_total_unique
+}' "$output_file"
+
 echo ""
 echo "========================================"
 echo "=== ADDITIONAL STATISTICS ==="
@@ -398,4 +838,50 @@ if [ -n "$unique_brain_regions" ]; then
     done
 fi
 echo ""
+
+echo "========================================"
+echo "=== DISEASE CATEGORY (PRIMARY DIAGNOSIS) SUMMARY ==="
+awk -F'\t' '
+NR==1 {
+    for (i=1; i<=NF; i++) {
+        if ($i ~ /^n_subjects_[a-z]/) dx_cols[i] = $i
+        if ($i == "condition_counts") cond_col = i
+    }
+    next
+}
+NR>1 {
+    for (i in dx_cols)
+        if ($i ~ /^[0-9]+$/ && $i+0 > 0) totals[dx_cols[i]] += $i+0
+    if (cond_col > 0 && $cond_col != "" && $cond_col != "NA") {
+        n = split($cond_col, pairs, "|")
+        for (j=1; j<=n; j++) {
+            m = split(pairs[j], kv, ":")
+            if (m >= 2) cond_totals[kv[1]] += kv[2]
+        }
+    }
+}
+END {
+    if (length(totals) > 0) {
+        print "--- Primary diagnosis (CLINPATH) ---"
+        for (d in totals) printf "%s: %d\n", d, totals[d]
+        print ""
+    }
+    if (length(cond_totals) > 0) {
+        print "--- Condition (SAMPLE/CONDITION table) ---"
+        for (d in cond_totals) printf "%s: %d\n", d, cond_totals[d]
+        print ""
+        total = 0
+        for (d in cond_totals) total += cond_totals[d]
+        printf "Total unique conditions: %d\n", length(cond_totals)
+        printf "Total condition entries: %d\n", total
+    }
+    if (length(totals) == 0 && length(cond_totals) == 0)
+        print "No primary_diagnosis or condition data found"
+}
+' "$output_file"
+echo ""
 echo "Saved results to [$(pwd)/$output_file]"
+echo "Saved subject membership to [$(pwd)/$subject_membership_file]"
+echo "Saved sample membership to [$(pwd)/$sample_membership_file]"
+echo "Saved subject diagnosis membership to [$(pwd)/$subject_diagnosis_membership_file]"
+echo "Saved brain donor membership to [$(pwd)/$brain_donor_membership_file]"
