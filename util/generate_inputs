@@ -30,12 +30,11 @@ def generate_sample_list(projects):
         elif args.workflow_name == "sc_atacseq_analysis":
             for pool in project["pools"]:
                 for sample in pool["samples"]:
-                    for sid in sample["sample_id"]:
-                        sample_list_table.append({
-                            "team_id": team_id,
-                            "sample_id": sid,
-                            "dataset_doi_url": dataset_doi_url
-                        })
+                    sample_list_table.append({
+                        "team_id": team_id,
+                        "sample_id": sample["sample_id"],
+                        "dataset_doi_url": dataset_doi_url
+                    })
         else:
             for sample in project["samples"]:
                 sample_id = sample["sample_id"]
@@ -83,6 +82,7 @@ def main(args):
             pool_id = row.pool_id
             asap_dataset_id = row.ASAP_dataset_id
             sample_id = row.ASAP_sample_id
+            source_subject_id = row.subject_id
             asap_subject_id = row.ASAP_subject_id
             batch = str(row.batch)
             fastq_R1s = literal_eval(row.fastq_R1s)
@@ -173,10 +173,12 @@ def main(args):
                 
                 if args.workflow_name == "sc_atacseq_analysis":
                     sample_obj = {
-                        "asap_subject_id": [asap_subject_id],
-                        "sample_id": [sample_id],
-                        "batch": [batch] if not pd.isna(batch) else [],
+                        "source_subject_id": source_subject_id,
+                        "asap_subject_id": asap_subject_id,
+                        "sample_id": sample_id,
                     }
+                    if not pd.isna(batch):
+                        sample_obj["batch"] = batch
                     pool_obj = {
                         "pool_id": pool_id,
                         "fastq_R1s": fastq_R1s,
@@ -218,10 +220,12 @@ def main(args):
                     )
                     if existing_pool is None:
                         sample_obj = {
-                            "asap_subject_id": [asap_subject_id],
-                            "sample_id": [sample_id],
-                            "batch": [batch] if not pd.isna(batch) else [],
+                            "source_subject_id": source_subject_id,
+                            "asap_subject_id": asap_subject_id,
+                            "sample_id": sample_id,
                         }
+                        if not pd.isna(batch):
+                            sample_obj["batch"] = batch
                         pool_obj = {
                             "pool_id": pool_id,
                             "fastq_R1s": fastq_R1s,
@@ -239,11 +243,14 @@ def main(args):
                         existing_pool["fastq_R3s"].extend(r for r in fastq_R3s if r not in existing_pool["fastq_R3s"])
                         existing_pool["fastq_I1s"].extend(r for r in fastq_I1s if r not in existing_pool["fastq_I1s"])
                         existing_pool["fastq_I2s"].extend(r for r in fastq_I2s if r not in existing_pool["fastq_I2s"])
-                        existing_sample = existing_pool["samples"][0]
-                        existing_sample["asap_subject_id"].append(asap_subject_id)
-                        existing_sample["sample_id"].append(sample_id)
+                        sample_obj = {
+                            "source_subject_id": source_subject_id,
+                            "asap_subject_id": asap_subject_id,
+                            "sample_id": sample_id,
+                        }
                         if not pd.isna(batch):
-                            existing_sample["batch"].append(batch)
+                            sample_obj["batch"] = batch
+                        existing_pool["samples"].append(sample_obj)
                 else:
                     projects[team_id]["samples"].append(sample)
 
