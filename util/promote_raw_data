@@ -73,7 +73,7 @@ def main(args):
 			logging.info(f"Promoting data for all raw buckets: [{raw_buckets_to_promote}]")
 		else:
 			raw_buckets_to_promote = unembargoed_platforming_raw_buckets
-			logging.info(f"Not promoting data for previously released raw buckets: [{raw_buckets_to_promote}]")
+			logging.info(f"Promoting data for {args.release_version} data in raw buckets: [{raw_buckets_to_promote}]")
 		for raw_bucket in raw_buckets_to_promote:
 			curated_bucket = raw_bucket.replace("raw", "curated")
 			dirs = list_dirs(raw_bucket)
