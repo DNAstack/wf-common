@@ -215,7 +215,7 @@ if __name__ == "__main__":
 		"--datasets",
 		nargs="+",
 		required=False,
-		help="Space-delimited dataset IDs to promote."
+		help="Space-delimited dataset IDs to promote. If provided, supersedes --all-datasets."
 	)
 	parser.add_argument(
 		"-a",
