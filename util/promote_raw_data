@@ -65,12 +65,15 @@ def main(args):
 	dry_run = not args.promote
 
 	if args.type_of_release == "urgent" or args.type_of_release == "minor":
-		if args.all_datasets:
+		if args.datasets:
+			raw_buckets_to_promote = [f"gs://asap-raw-{d}" for d in args.datasets]
+			logging.info(f"Promoting specified datasets: {raw_buckets_to_promote}")
+		elif args.all_datasets:
 			raw_buckets_to_promote = list(set(completed_platforming_raw_buckets + unembargoed_platforming_raw_buckets))
 			logging.info(f"Promoting data for all raw buckets: [{raw_buckets_to_promote}]")
 		else:
 			raw_buckets_to_promote = unembargoed_platforming_raw_buckets
-			logging.info(f"Not promoting data for previously released raw buckets: [{raw_buckets_to_promote}]")
+			logging.info(f"Promoting data for {args.release_version} data in raw buckets: [{raw_buckets_to_promote}]")
 		for raw_bucket in raw_buckets_to_promote:
 			curated_bucket = raw_bucket.replace("raw", "curated")
 			dirs = list_dirs(raw_bucket)
@@ -99,20 +102,23 @@ def main(args):
 			else:
 				logging.info(f"Raw bucket does not have spatial directory [{raw_bucket}]; skipping")
 
+			cohort = "cohort" in raw_bucket
 			# GCP bucket permissions and labels
 			if dry_run:
-				logging.info(f"Would remove internal-qc-data label from [{raw_bucket}]")
 				logging.info(f"Would grant storage.objectViewer permission to asap-cloud-readers@verily-bvdp.com on [{raw_bucket}]")
-				logging.info(f"Would remove Storage Admin access and grant Storage Object Creator and Viewer to CRN Teams for [{raw_bucket}] on Google Group and Service Account")
+				if not cohort:
+					logging.info(f"Would remove internal-qc-data label from [{raw_bucket}]")
+					logging.info(f"Would remove Storage Admin access and grant Storage Object Creator and Viewer to CRN Teams for [{raw_bucket}] on Google Group and Service Account")
 			else:
-				# Remove internal-qc-data label from released raw buckets
-				logging.info(f"Removing internal-qc-data label from [{raw_bucket}]")
-				remove_internal_qc_label(raw_bucket)
 				# Add Verily access
 				logging.info(f"Granting storage.objectViewer permission to asap-cloud-readers@verily-bvdp.com on [{raw_bucket}]")
 				add_verily_read_access(raw_bucket)
-				# Remove Storage Admin access from CRN Teams and grant Storage Object Creator and Viewer to released raw buckets
-				change_gg_storage_admin_to_read_write(raw_bucket)
+				if not cohort:
+					# Remove internal-qc-data label from released raw buckets
+					logging.info(f"Removing internal-qc-data label from [{raw_bucket}]")
+					remove_internal_qc_label(raw_bucket)
+					# Remove Storage Admin access from CRN Teams and grant Storage Object Creator and Viewer to released raw buckets
+					change_gg_storage_admin_to_read_write(raw_bucket)
 
 			# Remove old metadata that's in PROD metadata/release/
 			if "metadata" in dirs:
@@ -203,6 +209,13 @@ if __name__ == "__main__":
 		type=str,
 		required=True,
 		help="Type of release ['urgent', 'minor', 'major']."
+	)
+	parser.add_argument(
+		"-d",
+		"--datasets",
+		nargs="+",
+		required=False,
+		help="Space-delimited dataset IDs to promote. If provided, supersedes --all-datasets."
 	)
 	parser.add_argument(
 		"-a",

@@ -27,6 +27,14 @@ def generate_sample_list(projects):
                         "sample_id": sample_id,
                         "dataset_doi_url": dataset_doi_url
                     })
+        elif args.workflow_name == "sc_atacseq_analysis":
+            for pool in project["pools"]:
+                for sample in pool["samples"]:
+                    sample_list_table.append({
+                        "team_id": team_id,
+                        "sample_id": sample["sample_id"],
+                        "dataset_doi_url": dataset_doi_url
+                    })
         else:
             for sample in project["samples"]:
                 sample_id = sample["sample_id"]
@@ -44,9 +52,10 @@ def generate_sample_list(projects):
     len_sample_ids = len(sample_list_df["sample_id"])
     len_unique_sample_ids = len(sorted(sample_list_df["sample_id"].unique().tolist()))
     if len_sample_ids != len_unique_sample_ids:
-        raise SystemExit(
-            f"Duplicate sample IDs found\nNo. of sample IDs: {len_sample_ids}\nNo. of unique sample IDs: {len_unique_sample_ids}"
-        )
+        if args.workflow_name != "sc_atacseq_analysis":
+            raise SystemExit(
+                f"Duplicate sample IDs found\nNo. of sample IDs: {len_sample_ids}\nNo. of unique sample IDs: {len_unique_sample_ids}"
+            )
 
     return team_id_prefix, sample_list_df
 
@@ -70,8 +79,11 @@ def main(args):
             )
         for index, row in project_df.iterrows():
             team_id = row.team_id
+            pool_id = row.pool_id
             asap_dataset_id = row.ASAP_dataset_id
             sample_id = row.ASAP_sample_id
+            source_subject_id = row.subject_id
+            asap_subject_id = row.ASAP_subject_id
             batch = str(row.batch)
             fastq_R1s = literal_eval(row.fastq_R1s)
             fastq_R2s = literal_eval(row.fastq_R2s)
@@ -95,14 +107,6 @@ def main(args):
 
             if args.workflow_name == "sc_atacseq_analysis":
                 fastq_R3s = literal_eval(row.fastq_R3s)
-                sample = {
-                    "sample_id": sample_id,
-                    "fastq_R1s": fastq_R1s,
-                    "fastq_R2s": fastq_R2s,
-                    "fastq_R3s": fastq_R3s,
-                    "fastq_I1s": fastq_I1s,
-                    "fastq_I2s": fastq_I2s,
-                }
             else:
                 sample = {
                     "sample_id": sample_id,
@@ -112,8 +116,9 @@ def main(args):
                     "fastq_I2s": fastq_I2s,
                 }
 
-            if not pd.isna(batch):
-                sample["batch"] = batch
+            if args.workflow_name != "sc_atacseq_analysis":
+                if not pd.isna(batch):
+                    sample["batch"] = batch
 
             if args.workflow_name == "spatial_visium_analysis":
                 sample["visium_brightfield_image"] = visium_brightfield_image
@@ -137,19 +142,23 @@ def main(args):
                     "asap_team_id": team_id,
                     "asap_dataset_id": asap_dataset_id,
                     "asap_dataset_doi_url": asap_dataset_doi_url,
-                    "samples": [sample],
                     "run_project_cohort_analysis": run_project_cohort_analysis,
                     "raw_data_bucket": f"gs://asap-raw-{dataset_id}",
                     "staging_data_buckets": staging_data_buckets,
                 }
 
                 if args.workflow_name == "sc_rnaseq_analysis":
+                    projects[team_id]["samples"] = [sample]
                     projects[team_id]["multimodal_sc_data"] = "Boolean"
 
-                if args.workflow_name == "bulk_rnaseq_analysis":
+                elif args.workflow_name == "bulk_rnaseq_analysis":
+                    projects[team_id]["samples"] = [sample]
                     projects[team_id]["asap_project_sample_metadata_csv"] = f"gs://asap-raw-{dataset_id}/metadata/release/{args.release_version}/SAMPLE.csv"
 
-                if args.workflow_name == "spatial_geomx_analysis":
+                elif args.workflow_name == "spatial_visium_analysis":
+                    projects[team_id]["samples"] = [sample]
+
+                elif args.workflow_name == "spatial_geomx_analysis":
                     projects[team_id] = {
                         "asap_team_id": team_id,
                         "asap_dataset_id": asap_dataset_id,
@@ -161,6 +170,34 @@ def main(args):
                     }
                     projects[team_id]["asap_project_sample_metadata_csv"] = f"gs://asap-raw-{dataset_id}/metadata/release/{args.release_version}/SAMPLE.csv"
                     projects[team_id]["geomx_config_ini"] = "File"
+                
+                if args.workflow_name == "sc_atacseq_analysis":
+                    sample_obj = {
+                        "source_subject_id": source_subject_id,
+                        "asap_subject_id": asap_subject_id,
+                        "sample_id": sample_id,
+                    }
+                    if not pd.isna(batch):
+                        sample_obj["batch"] = batch
+                    pool_obj = {
+                        "pool_id": pool_id,
+                        "fastq_R1s": fastq_R1s,
+                        "fastq_R2s": fastq_R2s,
+                        "fastq_R3s": fastq_R3s,
+                        "fastq_I1s": fastq_I1s,
+                        "fastq_I2s": fastq_I2s,
+                        "samples": [sample_obj],
+                        "multimodal_data": "Boolean",
+                    }
+                    projects[team_id] = {
+                        "asap_team_id": team_id,
+                        "asap_dataset_id": asap_dataset_id,
+                        "asap_dataset_doi_url": asap_dataset_doi_url,
+                        "pools": [pool_obj],
+                        "run_project_cohort_analysis": run_project_cohort_analysis,
+                        "raw_data_bucket": f"gs://asap-raw-{dataset_id}",
+                        "staging_data_buckets": staging_data_buckets,
+                    }
             else:
                 if args.workflow_name == "spatial_geomx_analysis":
                     slide = next(
@@ -176,6 +213,44 @@ def main(args):
                         projects[team_id]["slides"].append(slide)
                     else:
                         slide["samples"].append(sample)
+                elif args.workflow_name == "sc_atacseq_analysis":
+                    existing_pool = next(
+                        (p for p in projects[team_id]["pools"] if p["pool_id"] == pool_id),
+                        None
+                    )
+                    if existing_pool is None:
+                        sample_obj = {
+                            "source_subject_id": source_subject_id,
+                            "asap_subject_id": asap_subject_id,
+                            "sample_id": sample_id,
+                        }
+                        if not pd.isna(batch):
+                            sample_obj["batch"] = batch
+                        pool_obj = {
+                            "pool_id": pool_id,
+                            "fastq_R1s": fastq_R1s,
+                            "fastq_R2s": fastq_R2s,
+                            "fastq_R3s": fastq_R3s,
+                            "fastq_I1s": fastq_I1s,
+                            "fastq_I2s": fastq_I2s,
+                            "samples": [sample_obj],
+                            "multimodal_data": "Boolean",
+                        }
+                        projects[team_id]["pools"].append(pool_obj)
+                    else:
+                        existing_pool["fastq_R1s"].extend(r for r in fastq_R1s if r not in existing_pool["fastq_R1s"])
+                        existing_pool["fastq_R2s"].extend(r for r in fastq_R2s if r not in existing_pool["fastq_R2s"])
+                        existing_pool["fastq_R3s"].extend(r for r in fastq_R3s if r not in existing_pool["fastq_R3s"])
+                        existing_pool["fastq_I1s"].extend(r for r in fastq_I1s if r not in existing_pool["fastq_I1s"])
+                        existing_pool["fastq_I2s"].extend(r for r in fastq_I2s if r not in existing_pool["fastq_I2s"])
+                        sample_obj = {
+                            "source_subject_id": source_subject_id,
+                            "asap_subject_id": asap_subject_id,
+                            "sample_id": sample_id,
+                        }
+                        if not pd.isna(batch):
+                            sample_obj["batch"] = batch
+                        existing_pool["samples"].append(sample_obj)
                 else:
                     projects[team_id]["samples"].append(sample)
 
